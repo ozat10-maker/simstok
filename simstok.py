@@ -66,9 +66,6 @@ st.sidebar.markdown("---")
 end_date = datetime.today()
 start_date = end_date - timedelta(days=365 * 2)
 
-# =========================================================
-# חלק 2: פונקציות הניתוח, הדיבידנדים ומנוע הפקודות העתידיות
-# =========================================================
 def load_stock_data(ticker_symbol, start, end):
     if not ticker_symbol:
         return pd.DataFrame(), {}
@@ -78,7 +75,6 @@ def load_stock_data(ticker_symbol, start, end):
         return hist_df, stock_obj
     except:
         return pd.DataFrame(), None
-
 def get_dividend_info(stock_obj):
     """שליפת מידע על יום ה-X ותאריך התשלום הקרוב של הדיבידנד"""
     div_info = {"ex_date": "אין נתונים", "pay_date": "אין נתונים", "amount": 0.0}
@@ -88,9 +84,9 @@ def get_dividend_info(stock_obj):
         calendar = stock_obj.calendar
         if calendar is not None and not calendar.empty:
             if 'Dividend Date' in calendar.index:
-                div_info["pay_date"] = calendar.loc['Dividend Date'].values[0].strftime('%Y-%m-%d')
+                div_info["pay_date"] = calendar.loc['Dividend Date'].values.strftime('%Y-%m-%d')
             if 'Ex-Dividend Date' in calendar.index:
-                div_info["ex_date"] = calendar.loc['Ex-Dividend Date'].values[0].strftime('%Y-%m-%d')
+                div_info["ex_date"] = calendar.loc['Ex-Dividend Date'].values.strftime('%Y-%m-%d')
         info = stock_obj.info
         div_info["amount"] = info.get("dividendRate", 0.0) if info.get("dividendRate") else 0.0
     except:
@@ -105,7 +101,7 @@ def check_and_execute_orders(db):
     for order in db.get("orders", []):
         tick = order["ticker"]
         target_price = order["target_price"]
-        order_type = order["type"] # 'BUY_LIMIT' או 'SELL_LIMIT'
+        order_type = order["type"] 
         qty = order["qty"]
         
         df, _ = load_stock_data(tick, datetime.today() - timedelta(days=5), datetime.today())
@@ -156,6 +152,7 @@ def calculate_portfolio_value(portfolio):
             total_val += current_value
             shares_values[tick] = current_value
     return total_val, shares_values
+
 def analyze_ticker(df, info_dict, investment_amount, risk_percent, ticker_name, portfolio_total_value, current_holding_value, selected_risk_profile):
     df['MA50'] = df['Close'].rolling(window=50).mean()
     df['MA200'] = df['Close'].rolling(window=200).mean()
@@ -214,7 +211,6 @@ def analyze_ticker(df, info_dict, investment_amount, risk_percent, ticker_name, 
         "current_price": current_price, "current_rsi": current_rsi, "waiting_target": waiting_target,
         "stop_loss_price": stop_loss_price, "analysis_reasons": analysis_reasons, "candle_pattern": candle_pattern_detected
     }
-
 # =========================================================
 # חלק 3: ממשק המשתמש ומערכת הרענון האוטומטי (כל דקה)
 # =========================================================
@@ -246,6 +242,7 @@ def render_realtime_simulator():
                 if qty > 0:
                     holding_data.append({"סימול": tick, "כמות מניות": qty, "שווי פוזיציה": f"${holdings_distribution.get(tick, 0):,.2f}"})
             st.table(pd.DataFrame(holding_data))
+
     if not ticker_1:
         st.warning("אנא הזן סימול מניה בשדה החובה בסרגל הצדי.")
     else:
@@ -271,7 +268,6 @@ def render_realtime_simulator():
             
             current_stock_price = res1['current_price']
             user_shares_held = db["portfolio"].get(ticker_1, 0.0)
-            
             with trade_col1:
                 trade_qty = st.number_input("כמות מניות לפעולה:", min_value=1, value=10, step=1)
                 action_mode = st.radio("סוג פעולה:", ["ביצוע מיידי (Market)", "פקודה עתידית (Limit)"])
@@ -323,6 +319,51 @@ def render_realtime_simulator():
 
             with trade_col3:
                 st.info(f"ℹ️ **סטטוס החזקה במניית {ticker_1}:** \n\n ברשותך כרגע **{user_shares_held}** מניות בשווי שוק של **${user_shares_held * current_stock_price:,.2f}**.\n\n מחיר שוק נוכחי: **${current_stock_price:.2f}**")
+
+            st.markdown("---")
+            st.subheader(f"📊 דוח ניתוח ממוקד: {info_dict.get('longName', ticker_1)} ({ticker_1})")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("מחיר נוכחי", f"${res1['current_price']:.2f}")
+            c2.metric("מדד RSI", f"{res1['current_rsi']:.1f}")
+            c3.metric("תבנית נר שזוהתה", res1['candle_pattern'])
+            c4.metric("סטטוס מערכת", res1['verdict'])
+
+            st.write("### 🧠 סיכום תהליך הניתוח והממצאים הטכניים")
+            st.write(f"הדוח מותאם אישית עבור פרופיל משקיע: **{risk_profile}**")
+            for reason in res1['analysis_reasons']: 
+                st.write(f" {reason}")
+
+            st.markdown("---")
+            st.subheader("🛡️ מחשבון ניהול סיכונים והנחיות פעולה לתקציב") 
+            
+            allowed_loss_usd = investment_amount * (risk_percent / 100)
+            risk_per_share = current_stock_price - res1['stop_loss_price']
+            if risk_per_share <= 0: risk_per_share = current_stock_price * 0.05
+            total_shares = int(allowed_loss_usd / risk_per_share)
+            if (total_shares * current_stock_price) > investment_amount:
+                total_shares = int(investment_amount / current_stock_price)
+            s_p1 = int(total_shares * 0.60)
+            s_p2 = total_shares - s_p1
+
+            col1, col2, col3 = st.columns(3)
+            if res1['verdict_type'] == "WAIT":
+                col1.metric("סך מניות לקנייה מיידית", "0 יחידות")
+                col2.metric("תקציב מנוצל כרגע", "$0.00")
+                col3.metric("מחיר קטיעת הפסד (Stop Loss)", f"${res1['stop_loss_price']:.2f}")
+                st.error(f"**אסטרטגיית פעולה ל-{ticker_1} (להמתין לירידה):**") 
+                st.markdown(f"* **אין לבצע קנייה במחיר השוק הנוכחי (${current_stock_price:.2f}).**\n* **פקודת לימיט עתידית:** מומלץ למקם פקודת רכש עבור **{total_shares}** יחידות ברמת התמיכה/בולינגר תחתון ב-**${res1['waiting_target']:.2f}**.")
+            elif res1['verdict_type'] == "HOLD":
+                col1.metric("סך מניות מומלץ", f"{s_p1} יחידות")
+                col2.metric("תקציב מנוצל ראשוני", f"${s_p1 * current_stock_price:,.2f}")
+                col3.metric("מחיר קטיעת הפסד (Stop Loss)", f"${res1['stop_loss_price']:.2f}")
+                st.warning(f"**אסטרטגיית פעולה ל-{ticker_1} (מצב ניטרלי/דשדוש):**") 
+                st.markdown(f"* **שלב א':** קנה רק **{s_p1}** יחידות במחיר הנוכחי (**${current_stock_price:.2f}**).\n* **שלב ב': שים פקודת לימיט ל**-**{s_p2}** יחידות בקו התמיכה (**${res1['waiting_target']:.2f}**).")
+            else: 
+                col1.metric("סך מניות מומלץ לקנייה", f"{total_shares} יחידות")
+                col2.metric("תקציב מנוצל בפועל", f"${(s_p1 * current_stock_price) + (s_p2 * res1['waiting_target']):,.2f}")
+                col3.metric("מחיר קטיעת הפסד (Stop Loss)", f"${res1['stop_loss_price']:.2f}")
+                st.success(f"**אסטרטגיית פעולה ל-{ticker_1} (אות קנייה):**") 
+                st.markdown(f"* **שלב א' (כניסה מיידית):** קנה **{s_p1}** מניות במחיר נוכחי (**${current_stock_price:.2f}**).\n* **שלב ב' (חיזוק בתמיכה):** הצב פקודת לימיט ל-**{s_p2}** מניות בשער **${res1['waiting_target']:.2f}**.")
 
             st.markdown("---")
             df = res1['df']
