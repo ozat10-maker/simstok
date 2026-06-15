@@ -23,7 +23,7 @@ def init_db():
     c = conn.cursor()
     # טבלת משתמשים (כולל רשימת מעקב ומחיר קנייה ממוצע בפורמט JSON)
     c.execute('''CREATE TABLE IF NOT EXISTS users 
-                 (username TEXT PRIMARY KEY, password TEXT, cash_ils REAL, portfolio TEXT, orders TEXT, watchlist TEXT)'''))
+                 (username TEXT PRIMARY KEY, password TEXT, cash_ils REAL, portfolio TEXT, orders TEXT, watchlist TEXT)''')
     # טבלת היסטוריית פעולות מפורטת
     c.execute('''CREATE TABLE IF NOT EXISTS history 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, timestamp TEXT, ticker TEXT, 
@@ -89,6 +89,7 @@ def load_user_history(username):
     return df
 
 init_db()
+
 def get_usd_ils_rate():
     """משיכת שער חליפין דולר-שקל עדכני מהשוק"""
     try:
