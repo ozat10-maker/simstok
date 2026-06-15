@@ -6,27 +6,25 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import hashlib
+import json
 from datetime import datetime, timedelta
 
 # =========================================================
-# חלק 1: הגדרות דף, בסיס נתונים SQLite ואבטחת משתמשים
+# חלק 1: הגדרות דף, בסיס נתונים SQLite ואלגוריתם מובילים
 # =========================================================
-st.set_page_config(page_title="סימולטור השקעות רב-משתמשים", layout="wide")
+st.set_page_config(page_title="סימולטור השקעות ומערכת מובילים", layout="wide")
 
 DB_FILE = "simulator_users.db"
 
 def init_db():
-    """יצירת טבלאות בסיס הנתונים במידה ואינן קיימות"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # טבלת משתמשים
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (username TEXT PRIMARY KEY, password TEXT, cash REAL, portfolio TEXT, orders TEXT)''')
     conn.commit()
     conn.close()
 
 def hash_password(password):
-    """הצפנת סיסמה למניעת שמירת טקסט חשוף"""
     return hashlib.sha256(password.encode()).hexdigest()
 
 def register_user(username, password):
@@ -36,7 +34,6 @@ def register_user(username, password):
     if c.fetchone():
         conn.close()
         return False
-    # משתמש חדש מקבל 10,000$ התחלתיים, תיק ריק ורשימת פקודות ריקה בפורמט JSON
     c.execute("INSERT INTO users VALUES (?, ?, 10000.0, '{}', '[]')", (username, hash_password(password)))
     conn.commit()
     conn.close()
@@ -57,12 +54,10 @@ def load_user_data(username):
     row = c.fetchone()
     conn.close()
     if row:
-        import json
         return {"cash": row[0], "portfolio": json.loads(row[1]), "orders": json.loads(row[2])}
     return {"cash": 10000.0, "portfolio": {}, "orders": []}
 
 def save_user_data(username, data):
-    import json
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("UPDATE users SET cash=?, portfolio=?, orders=? WHERE username=?", 
@@ -70,13 +65,54 @@ def save_user_data(username, data):
     conn.commit()
     conn.close()
 
+def get_all_users_for_leaderboard():
+    """שליפת כל המשתמשים וחישוב שווי התיק העדכני שלהם לטובת הדירוג"""
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT username, cash, portfolio FROM users")
+    rows = c.fetchall()
+    conn.close()
+    
+    leaderboard_data = []
+    # שמירת מחירי מניות זמנית כדי לא להעמיס קריאות ל-API
+    cached_prices = {}
+    cached_sectors = {}
+    
+    for row in rows:
+        uname, cash, portfolio_json = row[0], row[1], json.loads(row[2])
+        total_portfolio_value = 0.0
+        user_sectors = set()
+        
+        for tick, qty in portfolio_json.items():
+            if qty <= 0: continue
+            if tick not in cached_prices:
+                try:
+                    s = yf.Ticker(tick)
+                    df = s.history(period="1d")
+                    cached_prices[tick] = float(df['Close'].iloc[-1]) if not df.empty else 0.0
+                    cached_sectors[tick] = s.info.get('sector', 'Unknown')
+                except:
+                    cached_prices[tick] = 0.0
+                    cached_sectors[tick] = 'Unknown'
+            
+            total_portfolio_value += cached_prices[tick] * qty
+            user_sectors.add(cached_sectors[tick])
+            
+        net_worth = cash + total_portfolio_value
+        pct_return = ((net_worth - 10000.0) / 10000.0) * 100
+        
+        leaderboard_data.append({
+            "משתמש": uname,
+            "שווי תיק כולל": net_worth,
+            "תשואה מצטברת": pct_return,
+            "סקטורים": list(user_sectors)
+        })
+    return leaderboard_data
+
 init_db()
-# --- תצוגת מדדים מובילים בראש העמוד ---
 def render_top_market_indices():
-    """שליפת מדדים מובילים והצגתם כשורת כרטיסיות דינמית"""
     indices = {"S&P 500": "^GSPC", "Nasdaq 100": "^NDX", "Dow Jones": "^DJI", "Bitcoin": "BTC-USD"}
     cols = st.columns(len(indices))
-    
     for i, (name, ticker) in enumerate(indices.items()):
         try:
             df = yf.Ticker(ticker).history(period="2d")
@@ -85,16 +121,13 @@ def render_top_market_indices():
                 close_yesterday = df['Close'].iloc[-2]
                 pct_change = ((close_today - close_yesterday) / close_yesterday) * 100
                 cols[i].metric(name, f"${close_today:,.2f}", f"{pct_change:+.2f}%")
-            else:
-                cols[i].metric(name, "טוען...")
-        except:
-            cols[i].metric(name, "שגיאת נתונים")
+            else: cols[i].metric(name, "טוען...")
+        except: cols[i].metric(name, "שגיאה")
 
-st.title("📈 סימולטור השקעות אישי ומאובטח")
+st.title("📈 סימולטור השקעות חברתי ומנוע אנליטי")
 render_top_market_indices()
 st.markdown("---")
 
-# --- מנגנון ניהול סשן התחברות ---
 if 'logged_in_user' not in st.session_state:
     st.session_state['logged_in_user'] = None
 
@@ -110,40 +143,32 @@ if st.session_state['logged_in_user'] is None:
                 st.session_state['logged_in_user'] = login_user_input
                 st.success(f"ברוך הבא, {login_user_input}!")
                 st.rerun()
-            else:
-                st.error("שם משתמש או סיסמה שגויים.")
+            else: st.error("שם משתמש או סיסמה שגויים.")
                 
     with auth_tab2:
         reg_user_input = st.text_input("בחר שם משתמש:", key="reg_user").strip()
-        reg_pass_input = st.text_input("בחר סיסמה חזקה:", type="password", key="reg_pass").strip()
+        reg_pass_input = st.text_input("בחר סיסמה:", type="password", key="reg_pass").strip()
         if st.button("צור חשבון חדש", use_container_width=True):
             if reg_user_input and reg_pass_input:
-                if register_user(reg_user_input, reg_pass_input):
-                    st.success("החשבון נוצר בהצלחה! כעת ניתן לעבור ללשונית התחברות.")
-                else:
-                    st.error("שם המשתמש כבר תפוס במערכת.")
-            else:
-                st.warning("אנא מלא את כל השדות.")
-    st.stop() # עצירת ריצת שאר העמוד עד להתחברות
+                if register_user(reg_user_input, reg_pass_input): st.success("החשבון נוצר! בצע התחברות.")
+                else: st.error("שם המשתמש תפוס.")
+            else: st.warning("אנא מלא את כל השדות.")
+    st.stop()
 
-# אם הגענו לכאן, המשתמש מחובר
 current_user = st.session_state['logged_in_user']
-
-# קריאת הנתונים הספציפיים של המשתמש הנוכחי
 user_db = load_user_data(current_user)
 
-# --- (Sidebar) סרגל צדי למשתמש מחובר ---
-st.sidebar.subheader(f"👋 מחובר כעת: {current_user}")
-if st.sidebar.button("🚪 התנתק מהחשבון"):
+st.sidebar.subheader(f"👋 מחובר: {current_user}")
+if st.sidebar.button("🚪 התנתק"):
     st.session_state['logged_in_user'] = None
     st.rerun()
 st.sidebar.markdown("---")
 
-st.sidebar.header("👤 פרופיל משקיע ורמת סיכון")
-risk_profile = st.sidebar.selectbox(":בחר את רמת הסיכון", ["(Aggressive (אגרסיבי", "(Moderate (מאוזן ", "(Conservative (סולידי"], index=1)
-investment_amount = st.sidebar.number_input("(($) סכום הגדרת בסיס:", min_value=100, value=int(user_db["cash"]), step=500)
-risk_percent = st.sidebar.slider(":(%) אחוז סיכון מקסימלי", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
-ticker_1 = st.sidebar.text_input("🔍 בחירת מניה לסריקה ומסחר", value="AAPL").upper().strip()
+st.sidebar.header("👤 הגדרות סימולטור")
+risk_profile = st.sidebar.selectbox(":רמת סיכון", ["(Aggressive (אגרסיבי", "(Moderate (מאוזן ", "(Conservative (סולידי"], index=1)
+investment_amount = st.sidebar.number_input("(($) סכום בסיס:", min_value=100, value=int(user_db["cash"]), step=500)
+risk_percent = st.sidebar.slider(":(%) אחוז סיכון", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
+ticker_1 = st.sidebar.text_input("🔍 הזן סימול מניה", value="AAPL").upper().strip()
 
 end_date = datetime.today()
 start_date = end_date - timedelta(days=365 * 2)
@@ -154,17 +179,28 @@ def load_stock_data(ticker_symbol, start, end):
         return stock_obj.history(start=start, end=end, auto_adjust=True), stock_obj
     except: return pd.DataFrame(), None
 
-def get_dividend_info(stock_obj):
-    div_info = {"ex_date": "אין נתונים", "pay_date": "אין נתונים", "amount": 0.0}
-    if stock_obj is None: return div_info
+def calculate_periodic_returns(ticker_symbol):
+    """חישוב תשואות מדויקות לאחור עבור שבוע, חודש, חצי שנה ושנה"""
     try:
-        calendar = stock_obj.calendar
-        if calendar is not None and not calendar.empty:
-            if 'Dividend Date' in calendar.index: div_info["pay_date"] = calendar.loc['Dividend Date'].values.strftime('%Y-%m-%d')
-            if 'Ex-Dividend Date' in calendar.index: div_info["ex_date"] = calendar.loc['Ex-Dividend Date'].values.strftime('%Y-%m-%d')
-        div_info["amount"] = stock_obj.info.get("dividendRate", 0.0) or 0.0
-    except: pass
-    return div_info
+        stock = yf.Ticker(ticker_symbol)
+        df = stock.history(period="1y")
+        if df.empty or len(df) < 5: return None
+        
+        current_price = df['Close'].iloc[-1]
+        
+        # פונקציית עזר למניעת חריגת אינדקס
+        def get_pct(days_ago):
+            idx = max(0, len(df) - days_ago)
+            old_price = df['Close'].iloc[idx]
+            return ((current_price - old_price) / old_price) * 100
+
+        return {
+            "שבוע אחרון": f"{get_pct(5):+.2f}%",
+            "חודש אחרון": f"{get_pct(21):+.2f}%",
+            "חצי שנה": f"{get_pct(126):+.2f}%",
+            "שנה אחרונה": f"{get_pct(len(df)-1):+.2f}%"
+        }
+    except: return None
 
 def check_and_execute_user_orders(username, data):
     updated_orders = []
@@ -181,14 +217,12 @@ def check_and_execute_user_orders(username, data):
                 data["cash"] -= curr_price * qty
                 data["portfolio"][tick] = data["portfolio"].get(tick, 0) + qty
                 executed_any = True
-                st.toast(f"פקודת קנייה עתידית בוצעה עבור {tick}!")
         elif o_type == "SELL_LIMIT" and curr_price >= target:
             if data["portfolio"].get(tick, 0) >= qty:
                 data["cash"] += curr_price * qty
                 data["portfolio"][tick] -= qty
                 if data["portfolio"][tick] == 0: del data["portfolio"][tick]
                 executed_any = True
-                st.toast(f"פקודת מכירה עתידית בוצעה עבור {tick}!")
         else: updated_orders.append(order)
     if executed_any:
         data["orders"] = updated_orders
@@ -208,7 +242,7 @@ def calculate_portfolio_value(portfolio):
             shares_values[tick] = price * qty
     return total_val, shares_values
 
-def analyze_ticker(df, info_dict, investment_amount, risk_percent, selected_risk_profile):
+def analyze_ticker(df, selected_risk_profile):
     df['MA200'] = df['Close'].rolling(window=200).mean()
     df['BB_Middle'] = df['Close'].rolling(window=20).mean()
     df['BB_Std'] = df['Close'].rolling(window=20).std()
@@ -228,65 +262,72 @@ def analyze_ticker(df, info_dict, investment_amount, risk_percent, selected_risk
     score = 0
     if current_price > ma200_curr:
         score += 1
-        reasons.append(f"המניה במגמה ראשית עולה (מעל ממוצע 200: ${ma200_curr:.2f}).")
+        reasons.append(f"המניה במגמה ראשית עולה (מעל ממוצע 200).")
     else:
         score -= 1
-        reasons.append(f"המניה במגמת ירידה ארוכת טווח (מתחת לממוצע 200).")
-        
-    if current_price <= (bb_lower_curr * 1.02):
-        score += 1
-        reasons.append("המחיר קרוב לרצועת בולינגר התחתונה.")
+        reasons.append(f"המניה במגמת ירידה ארוכת טווח.")
         
     buy_threshold, sl_multiplier = (2, 0.98) if "סולידי" in selected_risk_profile else ((0, 0.94) if "אגרסיבי" in selected_risk_profile else (1, 0.96))
     verdict, v_type = ("הזדמנות קנייה (Buy)", "BUY") if score >= buy_threshold else (("להמתין לירידה (Wait)", "WAIT") if score < 0 else ("החזק / ניטרלי (Hold)", "HOLD"))
-    stop_loss = bb_lower_curr * sl_multiplier
     
-    return {"df": df, "verdict": verdict, "verdict_type": v_type, "current_price": current_price, "current_rsi": current_rsi, "waiting_target": bb_lower_curr, "stop_loss_price": stop_loss, "analysis_reasons": reasons}
+    return {"df": df, "verdict": verdict, "verdict_type": v_type, "current_price": current_price, "current_rsi": current_rsi, "waiting_target": bb_lower_curr, "stop_loss_price": bb_lower_curr * sl_multiplier, "analysis_reasons": reasons}
 # =========================================================
-# חלק 4: חדר מסחר אישי, תצוגת נתונים ורענון (כל דקה)
+# חלק 4: ממשק המשתמש, פרופיל חברה וטבלת מובילים
 # =========================================================
 
 @st.fragment(run_every=60)
 def render_realtime_simulator():
     global user_db
-    # בדיקת פקודות עתידיות ספציפיות למשתמש זה
     if check_and_execute_user_orders(current_user, user_db):
         user_db = load_user_data(current_user)
         
     portfolio_val, holdings_distribution = calculate_portfolio_value(user_db["portfolio"])
     total_net_worth = user_db["cash"] + portfolio_val
     
-    st.caption(f"🔄 עדכון נתונים אוטומטי של {current_user} פעיל (כל 60 שניות) | עדכון אחרון: {datetime.now().strftime('%H:%M:%S')}")
+    # --- תצוגת טבלת מובילים חברתית (Leaderboard) ---
+    st.subheader("🏆 טבלת מובילים ודירוג משקיעים")
+    lb_filter = st.selectbox("סנן מובילים לפי תחום פעילות:", ["כללי (הכל)", "Technology", "Healthcare", "Energy", "Financial Services"])
     
+    raw_lb = get_all_users_for_leaderboard()
+    if lb_filter != "כללי (הכל)":
+        filtered_lb = [u for u in raw_lb if lb_filter in u["סקטורים"]]
+    else: filtered_lb = raw_lb
+        
+    lb_df = pd.DataFrame(filtered_lb)
+    if not lb_df.empty:
+        lb_df = lb_df.sort_values(by="שווי תיק כולל", ascending=False).reset_index(drop=True)
+        lb_df.index += 1 # דירוג מ-1
+        st.dataframe(lb_df[["משתמש", "שווי תיק כולל", "תשואה מצטברת"]], use_container_width=True)
+    else: st.info("אין עדיין משתמשים שמחזיקים במניות מהתחום שנבחר.")
+    st.markdown("---")
+
+    # מצב כספי אישי
+    st.subheader(f"💼 חדר המסחר האישי של: {current_user}")
     col_w1, col_w2, col_w3 = st.columns(3)
     col_w1.metric("💵 מזומן פנוי במסחר", f"${user_db['cash']:,.2f}")
     col_w2.metric("📦 שווי מניות נוכחי", f"${portfolio_val:,.2f}")
     col_w3.metric("👑 שווי תיק כולל", f"${total_net_worth:,.2f}")
-    
-    if user_db.get("orders"):
-        with st.expander("⏳ פקודות עתידיות ממתינות (Limit Orders)"):
-            st.table(pd.DataFrame(user_db["orders"]))
-            
-    if user_db["portfolio"]:
-        with st.expander("💼 פירוט החזקות נוכחי בתיק"):
-            holding_data = [{"סימול": t, "כמות מניות": q, "שווי פוזיציה": f"${holdings_distribution.get(t, 0):,.2f}"} for t, q in user_db["portfolio"].items() if q > 0]
-            st.table(pd.DataFrame(holding_data))
 
     if ticker_1:
         df1, stock_obj1 = load_stock_data(ticker_1, start_date, end_date)
-        if df1.empty or len(df1) < 200:
-            st.error(f"שגיאה בסימול {ticker_1}")
-        else:
-            res1 = analyze_ticker(df1, stock_obj1.info if stock_obj1 else {}, investment_amount, risk_percent, risk_profile)
+        if not df1.empty and stock_obj1:
+            res1 = analyze_ticker(df1, risk_profile)
+            info = stock_obj1.info
             
-            st.subheader(f"📅 לוח דיבידנדים למניית {ticker_1}")
-            div_data = get_dividend_info(stock_obj1)
-            cd1, cd2, cd3 = st.columns(3)
-            cd1.metric("תשלום דיבידנד שנתי", f"${div_data['amount']:.2f}")
-            cd2.metric("יום ה-X (Ex-Date)", div_data['ex_date'])
-            cd3.metric("תאריך תשלום", div_data['pay_date'])
-            
-            st.subheader(f"🎛️ חדר מסחר וירטואלי של {current_user}: {ticker_1}")
+            # --- תוספת: כרטיס מידע על החברה ותשואות עבר ---
+            st.subheader(f"ℹ️ על החברה וביצועי מניית {ticker_1}")
+            with st.expander(f"🔍 קרא הסבר כללי על חברת {info.get('longName', ticker_1)} וביצועי עבר"):
+                st.write(f"**תחום פעילות (Sector):** {info.get('sector', 'N/A')} | **תעשייה:** {info.get('industry', 'N/A')}")
+                st.write(f"**תיאור עסקי:** {info.get('longBusinessSummary', 'אין תיאור זמין כעת.')}")
+                
+                # טבלת תשואות היסטוריות
+                returns_data = calculate_periodic_returns(ticker_1)
+                if returns_data:
+                    st.write("**📊 טבלת תשואות היסטוריות לתקופות זמן (הביצוע האחרון):**")
+                    st.table(pd.DataFrame([returns_data]))
+
+            # חדר מסחר וירטואלי
+            st.subheader(f"🎛️ פאנל ביצוע עסקאות")
             tc1, tc2, tc3 = st.columns(3)
             curr_stock_price = res1['current_price']
             user_shares = user_db["portfolio"].get(ticker_1, 0.0)
@@ -323,24 +364,17 @@ def render_realtime_simulator():
                             save_user_data(current_user, user_db); st.rerun()
 
             with tc3:
-                st.info(f" ברשותך **{user_shares}** מניות בשווי **${user_shares * curr_stock_price:,.2f}**.\n\n מחיר שוק: **${curr_stock_price:.2f}**")
+                st.info(f"ברשותך כרגע **{user_shares}** מניות.\n\nמחיר שוק: **${curr_stock_price:.2f}**")
 
-            # --- דוח ניתוח והמלצות ---
+            # דוח המלצות וגרף טכני
             st.markdown("---")
-            st.subheader(f"📊 דוח ניתוח ממוקד ומחשבון סיכונים: {ticker_1}")
-            col_m1, col_m2, col_m3 = st.columns(3)
+            st.subheader(f"📊 המלצות מערכת ומחשבון סיכונים")
+            col_m1, col_m2 = st.columns(2)
             col_m1.metric("סטטוס מערכת", res1['verdict'])
-            col_m2.metric("מדד RSI", f"{res1['current_rsi']:.1f}")
-            col_m3.metric("קטיעת הפסד מומלצת (SL)", f"${res1['stop_loss_price']:.2f}")
+            col_m2.metric("קטיעת הפסד מומלצת (SL)", f"${res1['stop_loss_price']:.2f}")
             
-            for r in res1['analysis_reasons']: st.write(f"• {r}")
-            
-            # --- גרף טכני ---
-            df = res1['df']
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.7, 0.3])
-            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Middle'], line=dict(color='cyan', width=1)), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=1.2)), row=2, col=1)
+            fig.add_trace(go.Candlestick(x=df1.index, open=df1['Open'], high=df1['High'], low=df1['Low'], close=df1['Close']), row=1, col=1)
             fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=350, margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(fig, use_container_width=True)
 
