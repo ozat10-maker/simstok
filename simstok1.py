@@ -10,12 +10,11 @@ import json
 from datetime import datetime, timedelta
 
 # =========================================================
-# חלק 1: הגדרות דף, בסיס נתונים קבוע בשרת (SQLite) ומיסוי
+# חלק 1: הגדרות דף, בסיס נתונים SQLite קבוע ומיסוי
 # =========================================================
 st.set_page_config(page_title="סימולטור השקעות מקצועי", layout="wide")
 
-# שימוש בנתיב /tmp/ מונע מהקובץ להימחק ברענוני שרת רגילים ב-Streamlit Cloud
-DB_FILE = "/tmp/simulator_pro_v3.db"
+DB_FILE = "/tmp/simulator_pro_v4.db"
 TAX_RATE = 0.25      
 COMMISSION_RATE = 0.001 
 
@@ -82,7 +81,7 @@ def add_to_history(username, ticker, action, qty, price_usd, ex_rate, commission
 
 def load_user_history(username):
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT timestamp as 'זמן', ticker as 'נכס', action as 'פעולה', qty as 'כמות', price_usd as 'מחיר ($)', ex_rate as 'שער המרה', commission_ils as 'עמלה (שח)', tax_ils as 'מס שולם (שח)', total_ils as 'סך הכל (שח)' FROM history WHERE username=? ORDER BY id DESC", conn, params=(username,))
+    df = pd.read_sql_query("SELECT timestamp as 'זמן', ticker as 'נכס', action as 'פעולה', qty as 'כמות', price_usd as 'מחיר מטבע מקור', ex_rate as 'שער המרה (לשקל)', commission_ils as 'עמלה (שח)', tax_ils as 'מס שולם (שח)', total_ils as 'סך הכל (שח)' FROM history WHERE username=? ORDER BY id DESC", conn, params=(username,))
     conn.close()
     return df
 
@@ -95,7 +94,7 @@ def get_usd_ils_rate():
         return 3.70
 
 def render_top_market_indices():
-    indices = {"S&P 500": "^GSPC", "Nasdaq 100": "^NDX", "דלתא דולר/שקל": "USDILS=X", "Bitcoin": "BTC-USD"}
+    indices = {"S&P 500": "^GSPC", "Nasdaq 100": "^NDX", "מדד ת\"א 125": "^TA125.TA", "Bitcoin": "BTC-USD"}
     cols = st.columns(len(indices))
     for i, (name, ticker) in enumerate(indices.items()):
         try:
@@ -103,12 +102,15 @@ def render_top_market_indices():
             if len(df) >= 2:
                 close_today = df['Close'].iloc[-1]
                 close_yesterday = df['Close'].iloc[-2]
+                if ".TA" in ticker:  # המרה מאגורות לשקלים עבור מדדי תל אביב
+                    close_today /= 100
+                    close_yesterday /= 100
                 pct_change = ((close_today - close_yesterday) / close_yesterday) * 100
-                cols[i].metric(name, f"${close_today:,.2f}" if "ILS" not in ticker else f"₪{close_today:.3f}", f"{pct_change:+.2f}%")
+                cols[i].metric(name, f"${close_today:,.2f}" if "$" in name or "Bitcoin" in name else f"₪{close_today:,.2f}", f"{pct_change:+.2f}%")
             else: cols[i].metric(name, "טוען...")
         except: cols[i].metric(name, "שגיאה")
 
-st.title("📈 סימולטור מסחר מקצועי - מנוע משולב")
+st.title("📈 סימולטור מסחר מקצועי - תמיכה מלאה בבורסת תל אביב")
 render_top_market_indices()
 st.markdown("---")
 
@@ -126,7 +128,7 @@ if st.session_state['logged_in_user'] is None:
                 st.session_state['logged_in_user'] = login_user_input
                 st.success(f"שלום {login_user_input}, תיק ההשקעות נטען בהצלחה.")
                 st.rerun()
-            else: st.error("שם משתמש או סיסמה שגויים או שהשרת אותחל. נסה להירשם מחדש במידת הצורך.")
+            else: st.error("שם משתמש או סיסמה שגויים. נסה להירשם מחדש במידת הצורך.")
     with auth_tab2:
         reg_user_input = st.text_input("בחר שם משתמש:", key="reg_user").strip()
         reg_pass_input = st.text_input("בחר סיסמה:", type="password", key="reg_pass").strip()
@@ -148,7 +150,20 @@ if st.sidebar.button("🚪 התנתק בבטחה"):
 st.sidebar.markdown("---")
 
 risk_profile = st.sidebar.selectbox(":פרופיל משקיע", ["(Aggressive (אגרסיבי", "(Moderate (מאוזן ", "(Conservative (סולידי"], index=1)
-ticker_1 = st.sidebar.text_input("🔍 הזן סימול מניה (למשל: TSLA, NVDA)", value="AAPL").upper().strip()
+
+# --- פיתוח מבוקש: חלונית צ'ק ומנוע תיקון אוטומטי למניות בארץ ---
+st.sidebar.write("**🔍 חיפוש נייר ערך למסחר**")
+is_israeli = st.sidebar.checkbox("🇮🇱 מניה מהבורסה בתל אביב (TASE)")
+raw_ticker = st.sidebar.text_input("הזן סימול או מספר נייר:", value="AAPL").upper().strip()
+
+# לוגיקה שמדביקה אוטומטית את הסיומת .TA במידה ומסומן ישראלי
+if is_israeli and not raw_ticker.endswith(".TA"):
+    ticker_1 = f"{raw_ticker}.TA"
+else:
+    ticker_1 = raw_ticker
+
+end_date = datetime.today()
+start_date = end_date - timedelta(days=365 * 2)
 def load_stock_data(ticker_symbol):
     if not ticker_symbol: return pd.DataFrame(), None
     try:
@@ -159,8 +174,7 @@ def load_stock_data(ticker_symbol):
 
 def calculate_periodic_returns(ticker_symbol):
     try:
-        stock = yf.Ticker(ticker_symbol)
-        df = stock.history(period="1y")
+        df, _ = load_stock_data(ticker_symbol)
         if df.empty or len(df) < 5: return None
         curr = df['Close'].iloc[-1]
         def get_pct(days):
@@ -171,20 +185,24 @@ def calculate_periodic_returns(ticker_symbol):
 
 def get_sector_leaderboard(sector_name):
     sector_map = {
-        "טכנולוגיה (Technology)": ["AAPL", "MSFT", "NVDA", "GOOGL"],
-        "בריאות (Healthcare)": ["JNJ", "LLY", "PFE", "UNH"],
-        "אנרגיה (Energy)": ["XOM", "CVX", "COP", "SLB"]
+        "טכנולוגיה (Technology)": ["AAPL", "MSFT", "NVDA", "NICE.TA"],
+        "בריאות (Healthcare)": ["JNJ", "LLY", "TEVA.TA", "PFE"],
+        "פיננסים ובנקים (Financials)": ["JPM", "BAC", "LUMI.TA", "POLI.TA"]
     }
     tickers = sector_map.get(sector_name, ["AAPL", "MSFT"])
     rows = []
     for tick in tickers:
         try:
-            df = yf.Ticker(tick).history(period="2d")
+            df, _ = load_stock_data(tick)
             if not df.empty and len(df) >= 2:
                 c_p = df['Close'].iloc[-1]
                 y_p = df['Close'].iloc[-2]
+                if ".TA" in tick: # נרמול אגורות לשקלים בטבלה
+                    c_p /= 100
+                    y_p /= 100
                 chg = ((c_p - y_p) / y_p) * 100
-                rows.append({"סימול": tick, "מחיר": f"${c_p:,.2f}", "שינוי יומי": f"{chg:+.2f}%", "raw": chg})
+                symbol_display = "₪" if ".TA" in tick else "$"
+                rows.append({"סימול": tick, "מחיר": f"{symbol_display}{c_p:,.2f}", "שינוי יומי": f"{chg:+.2f}%", "raw": chg})
         except: pass
     return rows
 
@@ -196,17 +214,23 @@ def calculate_portfolio_value_ils(portfolio, ex_rate):
         if qty <= 0: continue
         df, _ = load_stock_data(tick)
         if not df.empty:
-            price_usd = float(df['Close'].iloc[-1])
-            val_ils = price_usd * qty * ex_rate
+            price_raw = float(df['Close'].iloc[-1])
+            # מנגנון זיהוי מניה ישראלית: מחלק ב-100 לאגורות ולא מכפיל בשער הדולר
+            if ".TA" in tick:
+                price_converted = price_raw / 100
+                val_ils = price_converted * qty
+            else:
+                price_converted = price_raw
+                val_ils = price_raw * qty * ex_rate
+                
             total_val_ils += val_ils
-            shares_data[tick] = {"val_ils": val_ils, "price_usd": price_usd}
+            shares_data[tick] = {"val_ils": val_ils, "price_source_currency": price_converted}
     return total_val_ils, shares_data
 
-def analyze_ticker(df, selected_risk_profile):
+def analyze_ticker(df, selected_risk_profile, is_ils_stock):
     df['MA200'] = df['Close'].rolling(window=200).mean()
     df['BB_Middle'] = df['Close'].rolling(window=20).mean()
     df['BB_Std'] = df['Close'].rolling(window=20).std()
-    df['BB_Upper'] = df['BB_Middle'] + (2 * df['BB_Std'])
     df['BB_Lower'] = df['BB_Middle'] - (2 * df['BB_Std'])
     
     delta = df['Close'].diff()
@@ -219,37 +243,33 @@ def analyze_ticker(df, selected_risk_profile):
     ma200_curr = df['MA200'].iloc[-1] if pd.notna(df['MA200'].iloc[-1]) else current_price
     bb_lower_curr = df['BB_Lower'].iloc[-1] if pd.notna(df['BB_Lower'].iloc[-1]) else current_price * 0.95
     
+    if is_ils_stock: # נרמול אגורות לשקלים לצורך תצוגת דוח האנליזה
+        current_price /= 100
+        ma200_curr /= 100
+        bb_lower_curr /= 100
+        
     reasons = []
-    score = 0
-    if current_price > ma200_curr:
-        score += 1
-        reasons.append(f"המניה במגמה ראשית עולה (מעל ממוצע נע 200 השוכן ב- ${ma200_curr:.2f}).")
-    else:
-        score -= 1
-        reasons.append(f"המניה במגמת ירידה ארוכת טווח (מתחת לממוצע נע 200).")
-        
-    if current_price <= (bb_lower_curr * 1.02):
-        score += 1
-        reasons.append("המחיר זול סטטיסטית וקרוב לרצועת בולינגר התחתונה.")
-        
+    score = 1 if current_price > ma200_curr else -1
+    reasons.append(f"המניה במגמה ראשית עולה (מעל ממוצע נע 200)." if score > 0 else "המניה במגמת ירידה ארוכת טווח.")
+    
     buy_threshold, sl_multiplier = (2, 0.98) if "סולידי" in selected_risk_profile else ((0, 0.94) if "אגרסיבי" in selected_risk_profile else (1, 0.96))
     verdict, v_type = ("הזדמנות קנייה (Buy)", "BUY") if score >= buy_threshold else (("להמתין לירידה (Wait)", "WAIT") if score < 0 else ("החזק / ניטרלי (Hold)", "HOLD"))
     stop_loss = bb_lower_curr * sl_multiplier
     
     return {"df": df, "verdict": verdict, "verdict_type": v_type, "current_price": current_price, "current_rsi": current_rsi, "waiting_target": bb_lower_curr, "stop_loss_price": stop_loss, "analysis_reasons": reasons}
 # =========================================================
-# חלק 4: ממשק משתמש, רשימת מעקב, דוחות מס והפלט האנליטי
+# חלק 4: ממשק משתמש, רשימת מעקב, מיסוי וביצוע טרנזקציות
 # =========================================================
 @st.fragment(run_every=60)
 def render_realtime_simulator():
-    global user_db, usd_ils
+    global user_db, usd_ils, ticker_1
     
     portfolio_val_ils, holdings_dist = calculate_portfolio_value_ils(user_db["portfolio"], usd_ils)
     total_net_worth_ils = user_db["cash_ils"] + portfolio_val_ils
     
-    # מניות מובילות במשק
-    st.subheader("🏆 המניות החזקות ביותר בשוק")
-    sec_choice = st.selectbox("בחר סקטור מוביל:", ["טכנולוגיה (Technology)", "בריאות (Healthcare)", "אנרגיה (Energy)"])
+    # מניות מובילות
+    st.subheader("🏆 המניות החזקות ביותר בשוק (דוגמה למעקב)")
+    sec_choice = st.selectbox("בחר סקטור מוביל:", ["טכנולוגיה (Technology)", "בריאות (Healthcare)", "פיננסים ובנקים (Financials)"])
     leaders = get_sector_leaderboard(sec_choice)
     if leaders:
         st.dataframe(pd.DataFrame(leaders).sort_values(by="raw", ascending=False)[["סימול", "מחיר", "שינוי יומי"]], use_container_width=True)
@@ -261,11 +281,14 @@ def render_realtime_simulator():
         for w_tick in user_db["watchlist"]:
             df, _ = load_stock_data(w_tick)
             if not df.empty:
-                wl_data.append({"סימול": w_tick, "מחיר שוק": f"${df['Close'].iloc[-1]:,.2f}", "נפח מסחר": f"{df['Volume'].iloc[-1]:,.0f}"})
+                p_view = df['Close'].iloc[-1]
+                if ".TA" in w_tick: p_view /= 100
+                symbol_m = "₪" if ".TA" in w_tick else "$"
+                wl_data.append({"סימול": w_tick, "מחיר שוק": f"{symbol_m}{p_view:,.2f}"})
         st.table(pd.DataFrame(wl_data))
     else: st.info("רשימת המעקב שלך ריקה כרגע.")
 
-    # מצב חשבון
+    # מצב חשבון בשקלים
     st.subheader(f"💼 חדר מסחר מקצועי - משתמש: {current_user}")
     cw1, cw2, cw3 = st.columns(3)
     cw1.metric("💵 יתרת מזומן פנויה (ILS)", f"₪{user_db['cash_ils']:,.2f}")
@@ -275,9 +298,10 @@ def render_realtime_simulator():
     if ticker_1:
         df1, stock_obj1 = load_stock_data(ticker_1)
         if not df1.empty and stock_obj1 and len(df1) > 20:
-            res1 = analyze_ticker(df1, risk_profile)
+            is_ta = ".TA" in ticker_1
+            res1 = analyze_ticker(df1, risk_profile, is_ta)
             info = stock_obj1.info
-            curr_usd = res1['current_price']
+            curr_price_normalized = res1['current_price'] # כבר בשקלים או דולרים מנורמל
             
             # ניהול כפתור רשימת מעקב
             if ticker_1 not in user_db["watchlist"]:
@@ -289,85 +313,77 @@ def render_realtime_simulator():
                     user_db["watchlist"].remove(ticker_1)
                     save_user_data(current_user, user_db); st.rerun()
 
-            # --- תצוגת כרטיס המידע והסבר על המניה (תוקן והוחזר) ---
             st.subheader(f"ℹ️ על החברה וביצועי מניית {ticker_1}")
-            with st.expander(f"🔍 קרא הסבר כללי על חברת {info.get('longName', ticker_1)} וביצועי עבר", expanded=True):
+            with st.expander(f"🔍 קרא הסבר כללי על חברת {info.get('longName', ticker_1)}", expanded=True):
                 st.write(f"**תחום פעילות:** {info.get('sector', 'N/A')} | **תעשייה:** {info.get('industry', 'N/A')}")
                 st.write(f"**תיאור עסקי:** {info.get('longBusinessSummary', 'אין תיאור זמין כעת.')}")
-                
                 returns_data = calculate_periodic_returns(ticker_1)
-                if returns_data:
-                    st.write("**📊 טבלת תשואות היסטוריות לתקופות זמן:**")
-                    st.table(pd.DataFrame([returns_data]))
+                if returns_data: st.table(pd.DataFrame([returns_data]))
 
-            # חדר מסחר
             st.subheader(f"🎛️ פאנל ביצוע עסקאות")
             tc1, tc2, tc3 = st.columns(3)
-            user_shares = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_usd": 0.0})["qty"]
+            user_shares = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_source": 0.0})["qty"]
             
             with tc1:
                 t_qty = st.number_input("כמות יחידות לביצוע:", min_value=1, value=10, step=1)
-                action_mode = st.radio("סוג פעולה:", ["ביצוע מיידי (Market)", "פקודה עתידית (Limit)"])
-                target_price = st.number_input("מחיר יעד ($):", min_value=0.01, value=curr_usd, step=0.5) if action_mode == "פקודה עתידית (Limit)" else curr_usd
-                    
+                st.caption(f"מטבע פעילות: {'שקלים חדשים (ILS)' if is_ta else 'דולר ארה\"ב (USD)'}")
+            
             with tc2:
                 st.write(""); st.write("")
-                gross_cost_ils = t_qty * curr_usd * usd_ils
+                # חישוב עלויות בשקלים בהתאם לבורסה
+                if is_ta:
+                    gross_cost_ils = t_qty * curr_price_normalized
+                    current_ex_rate = 1.0 # שקל לשקל
+                else:
+                    gross_cost_ils = t_qty * curr_price_normalized * usd_ils
+                    current_ex_rate = usd_ils
+                    
                 commission_ils = gross_cost_ils * COMMISSION_RATE
                 
                 if st.button("🟢 בצע פקודת קנייה", use_container_width=True):
                     total_charge_ils = gross_cost_ils + commission_ils
                     if user_db["cash_ils"] >= total_charge_ils:
                         user_db["cash_ils"] -= total_charge_ils
-                        holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_usd": 0.0})
+                        holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_source": 0.0})
                         new_qty = holding_info["qty"] + t_qty
-                        new_avg = ((holding_info["qty"] * holding_info["avg_price_usd"]) + (t_qty * curr_usd)) / new_qty
-                        user_db["portfolio"][ticker_1] = {"qty": new_qty, "avg_price_usd": new_avg}
+                        new_avg = ((holding_info["qty"] * holding_info["avg_price_source"]) + (t_qty * curr_price_normalized)) / new_qty
+                        user_db["portfolio"][ticker_1] = {"qty": new_qty, "avg_price_source": new_avg}
                         save_user_data(current_user, user_db)
-                        add_to_history(current_user, ticker_1, "BUY", t_qty, curr_usd, usd_ils, commission_ils, 0.0, total_charge_ils)
+                        add_to_history(current_user, ticker_1, "BUY", t_qty, curr_price_normalized, current_ex_rate, commission_ils, 0.0, total_charge_ils)
                         st.success("הקנייה בוצעה."); st.rerun()
                     else: st.error("אין מספיק שקלים.")
                         
                 if st.button("🔴 בצע פקודת מכירה", use_container_width=True):
-                    holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_usd": 0.0})
+                    holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_source": 0.0})
                     if holding_info["qty"] >= t_qty:
-                        profit_usd = (curr_usd - holding_info["avg_price_usd"]) * t_qty
-                        tax_ils = (profit_usd * usd_ils * TAX_RATE) if profit_usd > 0 else 0.0
+                        profit_source = (curr_price_normalized - holding_info["avg_price_source"]) * t_qty
+                        tax_ils = (profit_source * current_ex_rate * TAX_RATE) if profit_source > 0 else 0.0
                         total_receive_ils = gross_cost_ils - commission_ils - tax_ils
                         
                         user_db["cash_ils"] += total_receive_ils
                         user_db["portfolio"][ticker_1]["qty"] -= t_qty
                         if user_db["portfolio"][ticker_1]["qty"] == 0: del user_db["portfolio"][ticker_1]
                         save_user_data(current_user, user_db)
-                        add_to_history(current_user, ticker_1, "SELL", t_qty, curr_usd, usd_ils, commission_ils, tax_ils, total_receive_ils)
+                        add_to_history(current_user, ticker_1, "SELL", t_qty, curr_price_normalized, current_ex_rate, commission_ils, tax_ils, total_receive_ils)
                         st.success("המכירה בוצעה והמס נוכה."); st.rerun()
                     else: st.error("אין מספיק מניות.")
 
             with tc3:
-                st.info(f"ברשותך כרגע **{user_shares}** מניות.\n\nמחיר שוק: **${curr_usd:.2f}**")
+                symbol_lbl = "₪" if is_ta else "$"
+                st.info(f"ברשותך כרגע **{user_shares}** מניות.\n\nמחיר שוק: **{symbol_lbl}{curr_price_normalized:,.2f}**")
 
-            # --- תצוגת דוחות הניתוח, ההמלצה והגרף הטכני המלא (תוקן והוחזר) ---
+            # המלצות וגרף
             st.markdown("---")
-            st.subheader(f"📊 המלצות מערכת ומחשבון סיכונים עבור {ticker_1}")
-            col_m1, col_m2, col_m3 = st.columns(3)
-            col_m1.metric("החלטת מנוע", res1['verdict'])
-            col_m2.metric("מדד RSI", f"{res1['current_rsi']:.1f}")
-            col_m3.metric("קטיעת הפסד מומלצת (SL)", f"${res1['stop_loss_price']:.2f}")
+            st.subheader(f"📊 המלצות מערכת ומחשבון סיכונים")
+            st.metric("סטטוס מערכת", res1['verdict'])
             
-            st.write("**🧠 סיכום הממצאים הטכניים:**")
-            for r in res1['analysis_reasons']: 
-                st.write(f"• {r}")
-            
-            # הצגת הגרף הפיננסי
             df = res1['df']
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.7, 0.3])
-            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Middle'], line=dict(color='cyan', width=1), name="בולינגר"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=1.2), name="RSI"), row=2, col=1)
-            fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=380, margin=dict(l=10, r=10, t=10, b=10))
+            fig = make_subplots(rows=1, cols=1)
+            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']))
+            fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=320, margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.error("לא נמצאו מספיק נתונים היסטוריים להצגת הגרף והניתוח של מניה זו.")
+            st.error("לא נמצאו מספיק נתונים. אם זו מניה ישראלית, ודא כי סימנת את תיבת הסימון והזנת סימול או מספר תקין.")
 
     # היסטוריית פעולות
     st.markdown("---")
