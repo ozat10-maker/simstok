@@ -10,9 +10,9 @@ import json
 from datetime import datetime, timedelta
 
 # =========================================================
-# חלק 1: הגדרות דף, בסיס נתונים SQLite ואלגוריתם מובילים
+# חלק 1: הגדרות דף, בסיס נתונים SQLite ואבטחת משתמשים
 # =========================================================
-st.set_page_config(page_title="סימולטור השקעות ומערכת מובילים", layout="wide")
+st.set_page_config(page_title="סימולטור השקעות ומניות מובילות", layout="wide")
 
 DB_FILE = "simulator_users.db"
 
@@ -65,51 +65,8 @@ def save_user_data(username, data):
     conn.commit()
     conn.close()
 
-def get_all_users_for_leaderboard():
-    """שליפת כל המשתמשים וחישוב שווי התיק העדכני שלהם לטובת הדירוג"""
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute("SELECT username, cash, portfolio FROM users")
-    rows = c.fetchall()
-    conn.close()
-    
-    leaderboard_data = []
-    # שמירת מחירי מניות זמנית כדי לא להעמיס קריאות ל-API
-    cached_prices = {}
-    cached_sectors = {}
-    
-    for row in rows:
-        uname, cash, portfolio_json = row[0], row[1], json.loads(row[2])
-        total_portfolio_value = 0.0
-        user_sectors = set()
-        
-        for tick, qty in portfolio_json.items():
-            if qty <= 0: continue
-            if tick not in cached_prices:
-                try:
-                    s = yf.Ticker(tick)
-                    df = s.history(period="1d")
-                    cached_prices[tick] = float(df['Close'].iloc[-1]) if not df.empty else 0.0
-                    cached_sectors[tick] = s.info.get('sector', 'Unknown')
-                except:
-                    cached_prices[tick] = 0.0
-                    cached_sectors[tick] = 'Unknown'
-            
-            total_portfolio_value += cached_prices[tick] * qty
-            user_sectors.add(cached_sectors[tick])
-            
-        net_worth = cash + total_portfolio_value
-        pct_return = ((net_worth - 10000.0) / 10000.0) * 100
-        
-        leaderboard_data.append({
-            "משתמש": uname,
-            "שווי תיק כולל": net_worth,
-            "תשואה מצטברת": pct_return,
-            "סקטורים": list(user_sectors)
-        })
-    return leaderboard_data
-
 init_db()
+# --- תצוגת מדדים מובילים בראש העמוד ---
 def render_top_market_indices():
     indices = {"S&P 500": "^GSPC", "Nasdaq 100": "^NDX", "Dow Jones": "^DJI", "Bitcoin": "BTC-USD"}
     cols = st.columns(len(indices))
@@ -124,7 +81,7 @@ def render_top_market_indices():
             else: cols[i].metric(name, "טוען...")
         except: cols[i].metric(name, "שגיאה")
 
-st.title("📈 סימולטור השקעות חברתי ומנוע אנליטי")
+st.title("📈 סימולטור השקעות ומנוע מניות מובילות")
 render_top_market_indices()
 st.markdown("---")
 
@@ -179,16 +136,50 @@ def load_stock_data(ticker_symbol, start, end):
         return stock_obj.history(start=start, end=end, auto_adjust=True), stock_obj
     except: return pd.DataFrame(), None
 
+def get_sector_leaderboard(sector_name):
+    """שליפה ודירוג של המניות החזקות ביותר במשק לפי הסקטור הנבחר"""
+    sector_map = {
+        "טכנולוגיה (Technology)": ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META"],
+        "בריאות (Healthcare)": ["JNJ", "LLY", "PFE", "UNH", "MRK", "ABV"],
+        "אנרגיה (Energy)": ["XOM", "CVX", "COP", "SLB", "EOG", "MPC"],
+        "פיננסים (Financials)": ["JPM", "BAC", "WFC", "MS", "GS", "V"]
+    }
+    
+    tickers = sector_map.get(sector_name, sector_map["טכנולוגיה (Technology)"])
+    leaderboard_rows = []
+    
+    for tick in tickers:
+        try:
+            stock = yf.Ticker(tick)
+            df = stock.history(period="5d")
+            if not df.empty and len(df) >= 2:
+                current_price = df['Close'].iloc[-1]
+                yesterday_price = df['Close'].iloc[-2]
+                daily_change = ((current_price - yesterday_price) / yesterday_price) * 100
+                
+                # שליפת תשואה שבועית פשוטה
+                oldest_price = df['Close'].iloc[0]
+                weekly_change = ((current_price - oldest_price) / oldest_price) * 100
+                
+                leaderboard_rows.append({
+                    "סימול מניה": tick,
+                    "שם החברה": stock.info.get('longName', tick),
+                    "מחיר נוכחי": f"${current_price:,.2f}",
+                    "שינוי יומי": f"{daily_change:+.2f}%",
+                    "תשואה שבועית": f"{weekly_change:+.2f}%",
+                    "raw_change": daily_change # לטובת המיון
+                })
+        except: pass
+        
+    return leaderboard_rows
+
 def calculate_periodic_returns(ticker_symbol):
-    """חישוב תשואות מדויקות לאחור עבור שבוע, חודש, חצי שנה ושנה"""
     try:
         stock = yf.Ticker(ticker_symbol)
         df = stock.history(period="1y")
         if df.empty or len(df) < 5: return None
-        
         current_price = df['Close'].iloc[-1]
         
-        # פונקציית עזר למניעת חריגת אינדקס
         def get_pct(days_ago):
             idx = max(0, len(df) - days_ago)
             old_price = df['Close'].iloc[idx]
@@ -241,40 +232,27 @@ def calculate_portfolio_value(portfolio):
             total_val += price * qty
             shares_values[tick] = price * qty
     return total_val, shares_values
-
 def analyze_ticker(df, selected_risk_profile):
     df['MA200'] = df['Close'].rolling(window=200).mean()
     df['BB_Middle'] = df['Close'].rolling(window=20).mean()
     df['BB_Std'] = df['Close'].rolling(window=20).std()
     df['BB_Lower'] = df['BB_Middle'] - (2 * df['BB_Std'])
-    
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-    
     current_price = float(df['Close'].iloc[-1])
-    current_rsi = df['RSI'].iloc[-1]
     ma200_curr = df['MA200'].iloc[-1]
     bb_lower_curr = df['BB_Lower'].iloc[-1]
     
     reasons = []
-    score = 0
-    if current_price > ma200_curr:
-        score += 1
-        reasons.append(f"המניה במגמה ראשית עולה (מעל ממוצע 200).")
-    else:
-        score -= 1
-        reasons.append(f"המניה במגמת ירידה ארוכת טווח.")
-        
+    score = 1 if current_price > ma200_curr else -1
+    reasons.append(f"המניה מעל ממוצע 200" if score > 0 else "המניה מתחת לממוצע 200")
+    
     buy_threshold, sl_multiplier = (2, 0.98) if "סולידי" in selected_risk_profile else ((0, 0.94) if "אגרסיבי" in selected_risk_profile else (1, 0.96))
     verdict, v_type = ("הזדמנות קנייה (Buy)", "BUY") if score >= buy_threshold else (("להמתין לירידה (Wait)", "WAIT") if score < 0 else ("החזק / ניטרלי (Hold)", "HOLD"))
     
-    return {"df": df, "verdict": verdict, "verdict_type": v_type, "current_price": current_price, "current_rsi": current_rsi, "waiting_target": bb_lower_curr, "stop_loss_price": bb_lower_curr * sl_multiplier, "analysis_reasons": reasons}
-# =========================================================
-# חלק 4: ממשק המשתמש, פרופיל חברה וטבלת מובילים
-# =========================================================
+    return {"df": df, "verdict": verdict, "verdict_type": v_type, "current_price": current_price, "current_rsi": 50.0, "waiting_target": bb_lower_curr, "stop_loss_price": bb_lower_curr * sl_multiplier, "analysis_reasons": reasons}
 
+# =========================================================
+# חלק 4: ממשק המשתמש והרצת המערכת
+# =========================================================
 @st.fragment(run_every=60)
 def render_realtime_simulator():
     global user_db
@@ -284,24 +262,22 @@ def render_realtime_simulator():
     portfolio_val, holdings_distribution = calculate_portfolio_value(user_db["portfolio"])
     total_net_worth = user_db["cash"] + portfolio_val
     
-    # --- תצוגת טבלת מובילים חברתית (Leaderboard) ---
-    st.subheader("🏆 טבלת מובילים ודירוג משקיעים")
-    lb_filter = st.selectbox("סנן מובילים לפי תחום פעילות:", ["כללי (הכל)", "Technology", "Healthcare", "Energy", "Financial Services"])
+    # --- תצוגת דירוג המניות החזקות במשק לפי סקטור ---
+    st.subheader("🏆 דירוג המניות החזקות והמובילות במשק")
+    sector_choice = st.selectbox("בחר תחום (סקטור) להצגת המניות החזקות ביותר:", 
+                                 ["טכנולוגיה (Technology)", "בריאות (Healthcare)", "אנרגיה (Energy)", "פיננסים (Financials)"])
     
-    raw_lb = get_all_users_for_leaderboard()
-    if lb_filter != "כללי (הכל)":
-        filtered_lb = [u for u in raw_lb if lb_filter in u["סקטורים"]]
-    else: filtered_lb = raw_lb
+    with st.spinner("סורק את מניות השקף המובילות..."):
+        sector_leaders = get_sector_leaderboard(sector_choice)
         
-    lb_df = pd.DataFrame(filtered_lb)
-    if not lb_df.empty:
-        lb_df = lb_df.sort_values(by="שווי תיק כולל", ascending=False).reset_index(drop=True)
-        lb_df.index += 1 # דירוג מ-1
-        st.dataframe(lb_df[["משתמש", "שווי תיק כולל", "תשואה מצטברת"]], use_container_width=True)
-    else: st.info("אין עדיין משתמשים שמחזיקים במניות מהתחום שנבחר.")
+    if sector_leaders:
+        leaders_df = pd.DataFrame(sector_leaders)
+        leaders_df = leaders_df.sort_values(by="raw_change", ascending=False).reset_index(drop=True)
+        leaders_df.index += 1 # דירוג מ-1
+        st.dataframe(leaders_df[["סימול מניה", "שם החברה", "מחיר נוכחי", "שינוי יומי", "תשואה שבועית"]], use_container_width=True)
     st.markdown("---")
 
-    # מצב כספי אישי
+    # חדר מסחר אישי
     st.subheader(f"💼 חדר המסחר האישי של: {current_user}")
     col_w1, col_w2, col_w3 = st.columns(3)
     col_w1.metric("💵 מזומן פנוי במסחר", f"${user_db['cash']:,.2f}")
@@ -314,19 +290,17 @@ def render_realtime_simulator():
             res1 = analyze_ticker(df1, risk_profile)
             info = stock_obj1.info
             
-            # --- תוספת: כרטיס מידע על החברה ותשואות עבר ---
             st.subheader(f"ℹ️ על החברה וביצועי מניית {ticker_1}")
             with st.expander(f"🔍 קרא הסבר כללי על חברת {info.get('longName', ticker_1)} וביצועי עבר"):
                 st.write(f"**תחום פעילות (Sector):** {info.get('sector', 'N/A')} | **תעשייה:** {info.get('industry', 'N/A')}")
                 st.write(f"**תיאור עסקי:** {info.get('longBusinessSummary', 'אין תיאור זמין כעת.')}")
                 
-                # טבלת תשואות היסטוריות
                 returns_data = calculate_periodic_returns(ticker_1)
                 if returns_data:
-                    st.write("**📊 טבלת תשואות היסטוריות לתקופות זמן (הביצוע האחרון):**")
+                    st.write("**📊 טבלת תשואות היסטוריות לתקופות זמן:**")
                     st.table(pd.DataFrame([returns_data]))
 
-            # חדר מסחר וירטואלי
+            # חדר מסחר
             st.subheader(f"🎛️ פאנל ביצוע עסקאות")
             tc1, tc2, tc3 = st.columns(3)
             curr_stock_price = res1['current_price']
@@ -347,7 +321,7 @@ def render_realtime_simulator():
                             save_user_data(current_user, user_db); st.rerun()
                         else: st.error("אין מספיק מזומן.")
                     else:
-                        user_db["orders"].append({"ticker": ticker_1, "type": "BUY_LIMIT", "target_price": target_price, "qty": trade_qty, "date": datetime.now().strftime('%m-%d %H:%M')})
+                        user_db["orders"].append({"ticker": ticker_1, "type": "BUY_LIMIT", "target_price": target_price, "qty": trade_qty})
                         save_user_data(current_user, user_db); st.rerun()
                         
                 if st.button("🔴 שלח פקודת מכירה", use_container_width=True):
@@ -360,22 +334,20 @@ def render_realtime_simulator():
                         else: st.error("אין מספיק מניות.")
                     else:
                         if user_shares >= trade_qty:
-                            user_db["orders"].append({"ticker": ticker_1, "type": "SELL_LIMIT", "target_price": target_price, "qty": trade_qty, "date": datetime.now().strftime('%m-%d %H:%M')})
+                            user_db["orders"].append({"ticker": ticker_1, "type": "SELL_LIMIT", "target_price": target_price, "qty": trade_qty})
                             save_user_data(current_user, user_db); st.rerun()
 
             with tc3:
                 st.info(f"ברשותך כרגע **{user_shares}** מניות.\n\nמחיר שוק: **${curr_stock_price:.2f}**")
 
-            # דוח המלצות וגרף טכני
+            # המלצות וגרף
             st.markdown("---")
             st.subheader(f"📊 המלצות מערכת ומחשבון סיכונים")
-            col_m1, col_m2 = st.columns(2)
-            col_m1.metric("סטטוס מערכת", res1['verdict'])
-            col_m2.metric("קטיעת הפסד מומלצת (SL)", f"${res1['stop_loss_price']:.2f}")
+            st.metric("סטטוס מערכת", res1['verdict'])
             
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.7, 0.3])
-            fig.add_trace(go.Candlestick(x=df1.index, open=df1['Open'], high=df1['High'], low=df1['Low'], close=df1['Close']), row=1, col=1)
-            fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=350, margin=dict(l=10, r=10, t=10, b=10))
+            fig = make_subplots(rows=1, cols=1)
+            fig.add_trace(go.Candlestick(x=df1.index, open=df1['Open'], high=df1['High'], low=df1['Low'], close=df1['Close']))
+            fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=300)
             st.plotly_chart(fig, use_container_width=True)
 
 render_realtime_simulator()
