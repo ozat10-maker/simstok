@@ -10,21 +10,20 @@ import json
 from datetime import datetime, timedelta
 
 # =========================================================
-# חלק 1: הגדרות דף, בסיס נתונים SQLite משודרג למיסים והיסטוריה
+# חלק 1: הגדרות דף, בסיס נתונים קבוע בשרת (SQLite) ומיסוי
 # =========================================================
 st.set_page_config(page_title="סימולטור השקעות מקצועי", layout="wide")
 
-DB_FILE = "simulator_pro_users.db"
-TAX_RATE = 0.25      # 25% מס רווח הון
-COMMISSION_RATE = 0.001 # 0.1% עמלת מסחר ממוצעת בשוק
+# שימוש בנתיב /tmp/ מונע מהקובץ להימחק ברענוני שרת רגילים ב-Streamlit Cloud
+DB_FILE = "/tmp/simulator_pro_v3.db"
+TAX_RATE = 0.25      
+COMMISSION_RATE = 0.001 
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # טבלת משתמשים (כולל רשימת מעקב ומחיר קנייה ממוצע בפורמט JSON)
     c.execute('''CREATE TABLE IF NOT EXISTS users 
                  (username TEXT PRIMARY KEY, password TEXT, cash_ils REAL, portfolio TEXT, orders TEXT, watchlist TEXT)''')
-    # טבלת היסטוריית פעולות מפורטת
     c.execute('''CREATE TABLE IF NOT EXISTS history 
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, timestamp TEXT, ticker TEXT, 
                   action TEXT, qty REAL, price_usd REAL, ex_rate REAL, commission_ils REAL, tax_ils REAL, total_ils REAL)''')
@@ -41,7 +40,6 @@ def register_user(username, password):
     if c.fetchone():
         conn.close()
         return False
-    # משתמש חדש מתחיל עם 100,000 ש"ח פנויים למסחר
     c.execute("INSERT INTO users VALUES (?, ?, 100000.0, '{}', '[]', '[]')", (username, hash_password(password)))
     conn.commit()
     conn.close()
@@ -89,9 +87,7 @@ def load_user_history(username):
     return df
 
 init_db()
-
 def get_usd_ils_rate():
-    """משיכת שער חליפין דולר-שקל עדכני מהשוק"""
     try:
         df = yf.Ticker("USDILS=X").history(period="1d")
         return float(df['Close'].iloc[-1]) if not df.empty else 3.70
@@ -112,7 +108,7 @@ def render_top_market_indices():
             else: cols[i].metric(name, "טוען...")
         except: cols[i].metric(name, "שגיאה")
 
-st.title("📈 סימולטור מסחר מקצועי כולל מיסוי, עמלות והמרת מטח")
+st.title("📈 סימולטור מסחר מקצועי - מנוע משולב")
 render_top_market_indices()
 st.markdown("---")
 
@@ -130,7 +126,7 @@ if st.session_state['logged_in_user'] is None:
                 st.session_state['logged_in_user'] = login_user_input
                 st.success(f"שלום {login_user_input}, תיק ההשקעות נטען בהצלחה.")
                 st.rerun()
-            else: st.error("שם משתמש או סיסמה שגויים.")
+            else: st.error("שם משתמש או סיסמה שגויים או שהשרת אותחל. נסה להירשם מחדש במידת הצורך.")
     with auth_tab2:
         reg_user_input = st.text_input("בחר שם משתמש:", key="reg_user").strip()
         reg_pass_input = st.text_input("בחר סיסמה:", type="password", key="reg_pass").strip()
@@ -157,7 +153,8 @@ def load_stock_data(ticker_symbol):
     if not ticker_symbol: return pd.DataFrame(), None
     try:
         stock_obj = yf.Ticker(ticker_symbol)
-        return stock_obj.history(start=datetime.today() - timedelta(days=365), end=datetime.today(), auto_adjust=True), stock_obj
+        df = stock_obj.history(period="2y", auto_adjust=True)
+        return df, stock_obj
     except: return pd.DataFrame(), None
 
 def calculate_periodic_returns(ticker_symbol):
@@ -169,7 +166,7 @@ def calculate_periodic_returns(ticker_symbol):
         def get_pct(days):
             old = df['Close'].iloc[max(0, len(df) - days)]
             return ((curr - old) / old) * 100
-        return {"שבוע": f"{get_pct(5):+.2f}%", "חודש": f"{get_pct(21):+.2f}%", "חצי שנה": f"{get_pct(126):+.2f}%", "שנה": f"{get_pct(len(df)-1):+.2f}%"}
+        return {"שבוע אחרון": f"{get_pct(5):+.2f}%", "חודש אחרון": f"{get_pct(21):+.2f}%", "חצי שנה": f"{get_pct(126):+.2f}%", "שנה אחרונה": f"{get_pct(len(df)-1):+.2f}%"}
     except: return None
 
 def get_sector_leaderboard(sector_name):
@@ -204,8 +201,44 @@ def calculate_portfolio_value_ils(portfolio, ex_rate):
             total_val_ils += val_ils
             shares_data[tick] = {"val_ils": val_ils, "price_usd": price_usd}
     return total_val_ils, shares_data
+
+def analyze_ticker(df, selected_risk_profile):
+    df['MA200'] = df['Close'].rolling(window=200).mean()
+    df['BB_Middle'] = df['Close'].rolling(window=20).mean()
+    df['BB_Std'] = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['BB_Middle'] + (2 * df['BB_Std'])
+    df['BB_Lower'] = df['BB_Middle'] - (2 * df['BB_Std'])
+    
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    df['RSI'] = 100 - (100 / (1 + (gain / (loss + 0.0001))))
+    
+    current_price = float(df['Close'].iloc[-1])
+    current_rsi = df['RSI'].iloc[-1] if pd.notna(df['RSI'].iloc[-1]) else 50.0
+    ma200_curr = df['MA200'].iloc[-1] if pd.notna(df['MA200'].iloc[-1]) else current_price
+    bb_lower_curr = df['BB_Lower'].iloc[-1] if pd.notna(df['BB_Lower'].iloc[-1]) else current_price * 0.95
+    
+    reasons = []
+    score = 0
+    if current_price > ma200_curr:
+        score += 1
+        reasons.append(f"המניה במגמה ראשית עולה (מעל ממוצע נע 200 השוכן ב- ${ma200_curr:.2f}).")
+    else:
+        score -= 1
+        reasons.append(f"המניה במגמת ירידה ארוכת טווח (מתחת לממוצע נע 200).")
+        
+    if current_price <= (bb_lower_curr * 1.02):
+        score += 1
+        reasons.append("המחיר זול סטטיסטית וקרוב לרצועת בולינגר התחתונה.")
+        
+    buy_threshold, sl_multiplier = (2, 0.98) if "סולידי" in selected_risk_profile else ((0, 0.94) if "אגרסיבי" in selected_risk_profile else (1, 0.96))
+    verdict, v_type = ("הזדמנות קנייה (Buy)", "BUY") if score >= buy_threshold else (("להמתין לירידה (Wait)", "WAIT") if score < 0 else ("החזק / ניטרלי (Hold)", "HOLD"))
+    stop_loss = bb_lower_curr * sl_multiplier
+    
+    return {"df": df, "verdict": verdict, "verdict_type": v_type, "current_price": current_price, "current_rsi": current_rsi, "waiting_target": bb_lower_curr, "stop_loss_price": stop_loss, "analysis_reasons": reasons}
 # =========================================================
-# חלק 4: ממשק משתמש, רשימת מעקב, דוחות מס והיסטוריה
+# חלק 4: ממשק משתמש, רשימת מעקב, דוחות מס והפלט האנליטי
 # =========================================================
 @st.fragment(run_every=60)
 def render_realtime_simulator():
@@ -221,7 +254,7 @@ def render_realtime_simulator():
     if leaders:
         st.dataframe(pd.DataFrame(leaders).sort_values(by="raw", ascending=False)[["סימול", "מחיר", "שינוי יומי"]], use_container_width=True)
         
-    # רשימת מעקב אישית (Watchlist)
+    # רשימת מעקב
     st.subheader("⭐ רשימת המעקב האישית שלי")
     if user_db["watchlist"]:
         wl_data = []
@@ -232,8 +265,8 @@ def render_realtime_simulator():
         st.table(pd.DataFrame(wl_data))
     else: st.info("רשימת המעקב שלך ריקה כרגע.")
 
-    # מצב חשבון בשקלים
-    st.subheader(f"💼 חדר מסחר מקצועי (חשבון בשקלים) - משתמש: {current_user}")
+    # מצב חשבון
+    st.subheader(f"💼 חדר מסחר מקצועי - משתמש: {current_user}")
     cw1, cw2, cw3 = st.columns(3)
     cw1.metric("💵 יתרת מזומן פנויה (ILS)", f"₪{user_db['cash_ils']:,.2f}")
     cw2.metric("📦 שווי החזקות במניות (ILS)", f"₪{portfolio_val_ils:,.2f}")
@@ -241,67 +274,102 @@ def render_realtime_simulator():
 
     if ticker_1:
         df1, stock_obj1 = load_stock_data(ticker_1)
-        if not df1.empty and stock_obj1:
-            curr_usd = float(df1['Close'].iloc[-1])
+        if not df1.empty and stock_obj1 and len(df1) > 20:
+            res1 = analyze_ticker(df1, risk_profile)
+            info = stock_obj1.info
+            curr_usd = res1['current_price']
             
             # ניהול כפתור רשימת מעקב
             if ticker_1 not in user_db["watchlist"]:
-                if st.button(f"➕ הוסף את {ticker_1} לרשימת המעקב", use_container_width=False):
+                if st.button(f"➕ הוסף את {ticker_1} לרשימת המעקב"):
                     user_db["watchlist"].append(ticker_1)
                     save_user_data(current_user, user_db); st.rerun()
             else:
-                if st.button(f"➖ הסר את {ticker_1} מרשימת המעקב", use_container_width=False):
+                if st.button(f"➖ הסר את {ticker_1} מרשימת המעקב"):
                     user_db["watchlist"].remove(ticker_1)
                     save_user_data(current_user, user_db); st.rerun()
 
-            st.subheader(f"🎛️ ביצוע הוראת מסחר עבור: {ticker_1}")
-            t_qty = st.number_input("כמות יחידות לביצוע:", min_value=1, value=10, step=1)
-            
-            # --- חישוב פרמטרים ודוח פעולה משוער ---
-            gross_cost_ils = t_qty * curr_usd * usd_ils
-            commission_ils = gross_cost_ils * COMMISSION_RATE
-            
-            st.markdown("### 📋 דוח פעולה ורישום פוזיציה משוער")
-            rep_c1, rep_c2, rep_c3 = st.columns(3)
-            rep_c1.write(f"**שווי נכס ברוטו:** ₪{gross_cost_ils:,.2f} (${curr_usd * t_qty:,.2f})")
-            rep_c2.write(f"**עמלת מסחר שוק (0.1%):** ₪{commission_ils:,.2f}")
-            
-            holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_usd": 0.0})
-            est_tax_ils = 0.0
-            if holding_info["qty"] > 0:
-                profit_per_share_usd = curr_usd - holding_info["avg_price_usd"]
-                if profit_per_share_usd > 0:
-                    est_tax_ils = (profit_per_share_usd * t_qty * usd_ils) * TAX_RATE
-            rep_c3.write(f"**מס רווח הון משוער (25%):** ₪{est_tax_ils:,.2f}")
+            # --- תצוגת כרטיס המידע והסבר על המניה (תוקן והוחזר) ---
+            st.subheader(f"ℹ️ על החברה וביצועי מניית {ticker_1}")
+            with st.expander(f"🔍 קרא הסבר כללי על חברת {info.get('longName', ticker_1)} וביצועי עבר", expanded=True):
+                st.write(f"**תחום פעילות:** {info.get('sector', 'N/A')} | **תעשייה:** {info.get('industry', 'N/A')}")
+                st.write(f"**תיאור עסקי:** {info.get('longBusinessSummary', 'אין תיאור זמין כעת.')}")
+                
+                returns_data = calculate_periodic_returns(ticker_1)
+                if returns_data:
+                    st.write("**📊 טבלת תשואות היסטוריות לתקופות זמן:**")
+                    st.table(pd.DataFrame([returns_data]))
 
-            act_c1, act_c2 = st.columns(2)
-            if act_c1.button("🟢 בצע פקודת קנייה", use_container_width=True):
-                total_charge_ils = gross_cost_ils + commission_ils
-                if user_db["cash_ils"] >= total_charge_ils:
-                    user_db["cash_ils"] -= total_charge_ils
-                    new_qty = holding_info["qty"] + t_qty
-                    new_avg = ((holding_info["qty"] * holding_info["avg_price_usd"]) + (t_qty * curr_usd)) / new_qty
-                    user_db["portfolio"][ticker_1] = {"qty": new_qty, "avg_price_usd": new_avg}
-                    save_user_data(current_user, user_db)
-                    add_to_history(current_user, ticker_1, "BUY", t_qty, curr_usd, usd_ils, commission_ils, 0.0, total_charge_ils)
-                    st.success("הקנייה בוצעה ונרשמה בהיסטוריה."); st.rerun()
-                else: st.error("אין מספיק שקלים בארנק.")
-
-            if act_c2.button("🔴 בצע פקודת מכירה", use_container_width=True):
-                if holding_info["qty"] >= t_qty:
-                    profit_usd = (curr_usd - holding_info["avg_price_usd"]) * t_qty
-                    tax_ils = (profit_usd * usd_ils * TAX_RATE) if profit_usd > 0 else 0.0
-                    total_receive_ils = gross_cost_ils - commission_ils - tax_ils
+            # חדר מסחר
+            st.subheader(f"🎛️ פאנל ביצוע עסקאות")
+            tc1, tc2, tc3 = st.columns(3)
+            user_shares = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_usd": 0.0})["qty"]
+            
+            with tc1:
+                t_qty = st.number_input("כמות יחידות לביצוע:", min_value=1, value=10, step=1)
+                action_mode = st.radio("סוג פעולה:", ["ביצוע מיידי (Market)", "פקודה עתידית (Limit)"])
+                target_price = st.number_input("מחיר יעד ($):", min_value=0.01, value=curr_usd, step=0.5) if action_mode == "פקודה עתידית (Limit)" else curr_usd
                     
-                    user_db["cash_ils"] += total_receive_ils
-                    user_db["portfolio"][ticker_1]["qty"] -= t_qty
-                    if user_db["portfolio"][ticker_1]["qty"] == 0: del user_db["portfolio"][ticker_1]
-                    save_user_data(current_user, user_db)
-                    add_to_history(current_user, ticker_1, "SELL", t_qty, curr_usd, usd_ils, commission_ils, tax_ils, total_receive_ils)
-                    st.success("המכירה בוצעה, המס נוכה והפעולה נרשמה בהיסטוריה."); st.rerun()
-                else: st.error("אין לך מספיק מניות למכירה.")
+            with tc2:
+                st.write(""); st.write("")
+                gross_cost_ils = t_qty * curr_usd * usd_ils
+                commission_ils = gross_cost_ils * COMMISSION_RATE
+                
+                if st.button("🟢 בצע פקודת קנייה", use_container_width=True):
+                    total_charge_ils = gross_cost_ils + commission_ils
+                    if user_db["cash_ils"] >= total_charge_ils:
+                        user_db["cash_ils"] -= total_charge_ils
+                        holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_usd": 0.0})
+                        new_qty = holding_info["qty"] + t_qty
+                        new_avg = ((holding_info["qty"] * holding_info["avg_price_usd"]) + (t_qty * curr_usd)) / new_qty
+                        user_db["portfolio"][ticker_1] = {"qty": new_qty, "avg_price_usd": new_avg}
+                        save_user_data(current_user, user_db)
+                        add_to_history(current_user, ticker_1, "BUY", t_qty, curr_usd, usd_ils, commission_ils, 0.0, total_charge_ils)
+                        st.success("הקנייה בוצעה."); st.rerun()
+                    else: st.error("אין מספיק שקלים.")
+                        
+                if st.button("🔴 בצע פקודת מכירה", use_container_width=True):
+                    holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_usd": 0.0})
+                    if holding_info["qty"] >= t_qty:
+                        profit_usd = (curr_usd - holding_info["avg_price_usd"]) * t_qty
+                        tax_ils = (profit_usd * usd_ils * TAX_RATE) if profit_usd > 0 else 0.0
+                        total_receive_ils = gross_cost_ils - commission_ils - tax_ils
+                        
+                        user_db["cash_ils"] += total_receive_ils
+                        user_db["portfolio"][ticker_1]["qty"] -= t_qty
+                        if user_db["portfolio"][ticker_1]["qty"] == 0: del user_db["portfolio"][ticker_1]
+                        save_user_data(current_user, user_db)
+                        add_to_history(current_user, ticker_1, "SELL", t_qty, curr_usd, usd_ils, commission_ils, tax_ils, total_receive_ils)
+                        st.success("המכירה בוצעה והמס נוכה."); st.rerun()
+                    else: st.error("אין מספיק מניות.")
 
-    # תצוגת היסטוריית פעולות מלאה של המשתמש
+            with tc3:
+                st.info(f"ברשותך כרגע **{user_shares}** מניות.\n\nמחיר שוק: **${curr_usd:.2f}**")
+
+            # --- תצוגת דוחות הניתוח, ההמלצה והגרף הטכני המלא (תוקן והוחזר) ---
+            st.markdown("---")
+            st.subheader(f"📊 המלצות מערכת ומחשבון סיכונים עבור {ticker_1}")
+            col_m1, col_m2, col_m3 = st.columns(3)
+            col_m1.metric("החלטת מנוע", res1['verdict'])
+            col_m2.metric("מדד RSI", f"{res1['current_rsi']:.1f}")
+            col_m3.metric("קטיעת הפסד מומלצת (SL)", f"${res1['stop_loss_price']:.2f}")
+            
+            st.write("**🧠 סיכום הממצאים הטכניים:**")
+            for r in res1['analysis_reasons']: 
+                st.write(f"• {r}")
+            
+            # הצגת הגרף הפיננסי
+            df = res1['df']
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.06, row_heights=[0.7, 0.3])
+            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['BB_Middle'], line=dict(color='cyan', width=1), name="בולינגר"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], line=dict(color='purple', width=1.2), name="RSI"), row=2, col=1)
+            fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=380, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.error("לא נמצאו מספיק נתונים היסטוריים להצגת הגרף והניתוח של מניה זו.")
+
+    # היסטוריית פעולות
     st.markdown("---")
     st.subheader("📜 יומן פעולות והיסטוריית עסקאות מלאה")
     hist_df = load_user_history(current_user)
