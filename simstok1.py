@@ -10,11 +10,11 @@ import json
 from datetime import datetime, timedelta
 
 # =========================================================
-# חלק 1: הגדרות דף, בסיס נתונים SQLite משודרג לזמני פוזיציות
+# חלק 1: הגדרות דף, בסיס נתונים SQLite משודרג ותיקון באג ה-JSON
 # =========================================================
 st.set_page_config(page_title="סימולטור השקעות מקצועי", layout="wide")
 
-DB_FILE = "/tmp/simulator_pro_v5.db"
+DB_FILE = "/tmp/simulator_pro_v6.db" # עדכון גרסה לאיפוס נקי בשרת
 TAX_RATE = 0.25      
 COMMISSION_RATE = 0.001 
 
@@ -59,7 +59,13 @@ def load_user_data(username):
     row = c.fetchone()
     conn.close()
     if row:
-        return {"cash_ils": row, "portfolio": json.loads(row), "orders": json.loads(row), "watchlist": json.loads(row)}
+        # תיקון קריטי: שליפת הנתונים לפי האינדקסים המדויקים של העמודות ב-SQL
+        return {
+            "cash_ils": float(row[0]), 
+            "portfolio": json.loads(row[1]), 
+            "orders": json.loads(row[2]), 
+            "watchlist": json.loads(row[3])
+        }
     return {"cash_ils": 100000.0, "portfolio": {}, "orders": [], "watchlist": []}
 
 def save_user_data(username, data):
@@ -86,6 +92,7 @@ def load_user_history(username):
     return df
 
 init_db()
+
 def get_usd_ils_rate():
     try:
         df = yf.Ticker("USDILS=X").history(period="1d")
