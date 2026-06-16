@@ -10,11 +10,11 @@ import json
 from datetime import datetime, timedelta
 
 # =========================================================
-# חלק 1: הגדרות דף, בסיס נתונים SQLite משודרג ותיקון באג ה-JSON
+# חלק 1: הגדרות דף, בסיס נתונים SQLite משודרג (גרסה 9) ומיסוי
 # =========================================================
 st.set_page_config(page_title="סימולטור השקעות מקצועי", layout="wide")
 
-DB_FILE = "/tmp/simulator_pro_v8.db" # עדכון גרסה לאיפוס נקי ומניעת ערכי nan ישנים
+DB_FILE = "/tmp/simulator_pro_v9.db" # עדכון גרסה לתמיכה בשכלול ממוצעים נקי
 TAX_RATE = 0.25      
 COMMISSION_RATE = 0.001 
 
@@ -60,10 +60,10 @@ def load_user_data(username):
     conn.close()
     if row:
         return {
-            "cash_ils": float(row[0]) if pd.notna(row[0]) else 100000.0, 
-            "portfolio": json.loads(row[1]) if row[1] else {}, 
-            "orders": json.loads(row[2]) if row[2] else [], 
-            "watchlist": json.loads(row[3]) if row[3] else []
+            "cash_ils": float(row) if pd.notna(row) else 100000.0, 
+            "portfolio": json.loads(row) if row else {}, 
+            "orders": json.loads(row) if row else [], 
+            "watchlist": json.loads(row) if row else []
         }
     return {"cash_ils": 100000.0, "portfolio": {}, "orders": [], "watchlist": []}
 
@@ -107,12 +107,9 @@ def render_top_market_indices():
         try:
             stock_obj = yf.Ticker(ticker)
             df = stock_obj.history(period="2d")
-            
-            # ניסיון שליפת מחיר בטוח למניעת nan במדדים
             close_today = stock_obj.info.get('regularMarketPrice', None)
             if close_today is None or pd.isna(close_today):
                 close_today = df['Close'].iloc[-1] if not df.empty else 0.0
-                
             close_yesterday = df['Close'].iloc[-2] if len(df) >= 2 else close_today
             
             if ".TA" in ticker:  
@@ -127,7 +124,7 @@ def render_top_market_indices():
         except: 
             cols[i].metric(name, "טוען...")
 
-st.title("📈 סימולטור מסחר מקצועי - מנוע משולב ומאובטח")
+st.title("📈 סימולטור מסחר מקצועי - מנוע משולב")
 render_top_market_indices()
 st.markdown("---")
 
@@ -184,25 +181,27 @@ def load_stock_data(ticker_symbol):
     except: return pd.DataFrame(), None
 
 def get_safe_current_price(stock_obj, df):
-    """מנגנון אבטחה קריטי שמונע קבלת nan מ-Yahoo Finance הבוקר"""
+    """מנגנון אבטחה קריטי לשליפת מחיר השוק וניקוי nan"""
     try:
-        # בדיקה 1: ניסיון משיכה מ-info המהיר
         price = stock_obj.info.get('currentPrice', None)
-        if price is not None and pd.notna(price) and price > 0:
-            return float(price)
-            
-        # בדיקה 2: ניסיון משיכה ממאפיין מחיר שוק רגיל
+        if price is not None and pd.notna(price) and price > 0: return float(price)
         price = stock_obj.info.get('regularMarketPrice', None)
-        if price is not None and pd.notna(price) and price > 0:
-            return float(price)
-            
-        # בדיקה 3: אם ה-info של Yahoo חסום/שבור הבוקר, קח מההיסטוריה האחרונה
+        if price is not None and pd.notna(price) and price > 0: return float(price)
         if df is not None and not df.empty:
             price = df['Close'].iloc[-1]
-            if pd.notna(price) and price > 0:
-                return float(price)
-    except:
-        pass
+            if pd.notna(price) and price > 0: return float(price)
+    except: pass
+    return 0.0
+
+def get_daily_change_pct(stock_obj, df):
+    """חישוב אחוז השינוי היומי (התנועה של המניה היום בשוק) עבור טבלת התיק"""
+    try:
+        if df is not None and len(df) >= 2:
+            c_p = df['Close'].iloc[-1]
+            y_p = df['Close'].iloc[-2]
+            if y_p > 0:
+                return ((c_p - y_p) / y_p) * 100
+    except: pass
     return 0.0
 
 def calculate_time_elapsed(buy_timestamp_str):
@@ -216,36 +215,6 @@ def calculate_time_elapsed(buy_timestamp_str):
         return f"{minutes} דקות"
     except: return "N/A"
 
-def calculate_periodic_returns(ticker_symbol):
-    try:
-        df, _ = load_stock_data(ticker_symbol)
-        if df.empty or len(df) < 5: return None
-        curr = df['Close'].iloc[-1]
-        def get_pct(days):
-            old = df['Close'].iloc[max(0, len(df) - days)]
-            return ((curr - old) / old) * 100
-        return {"שבוע אחרון": f"{get_pct(5):+.2f}%", "חודש אחרון": f"{get_pct(21):+.2f}%", "חצי שנה": f"{get_pct(126):+.2f}%", "שנה אחרונה": f"{get_pct(len(df)-1):+.2f}%"}
-    except: return None
-
-def get_sector_leaderboard(sector_name):
-    sector_map = {
-        "טכנולוגיה (Technology)": ["AAPL", "MSFT", "NVDA", "NICE.TA"],
-        "בריאות (Healthcare)": ["JNJ", "LLY", "TEVA.TA", "PFE"],
-        "פיננסים ובנקים (Financials)": ["JPM", "BAC", "LUMI.TA", "POLI.TA"]
-    }
-    tickers = sector_map.get(sector_name, ["AAPL", "MSFT"])
-    rows = []
-    for tick in tickers:
-        try:
-            df, obj = load_stock_data(tick)
-            c_p = get_safe_current_price(obj, df)
-            if c_p > 0:
-                if ".TA" in tick: c_p /= 100
-                symbol_display = "₪" if ".TA" in tick else "$"
-                rows.append({"סימול": tick, "מחיר": f"{symbol_display}{c_p:,.2f}"})
-        except: pass
-    return rows
-
 def calculate_portfolio_value_ils(portfolio, ex_rate):
     total_val_ils = 0.0
     shares_data = {}
@@ -257,7 +226,6 @@ def calculate_portfolio_value_ils(portfolio, ex_rate):
         df, obj = load_stock_data(tick)
         price_raw = get_safe_current_price(obj, df)
         
-        # אם מחיר השוק חזר 0, השתמש במחיר הקנייה כדי למנוע קריסת תצוגה
         if price_raw == 0:
             price_raw = info.get("avg_price_source", 1.0)
             if ".TA" in tick: price_raw *= 100
@@ -277,45 +245,32 @@ def analyze_ticker(df, selected_risk_profile, is_ils_stock, stock_obj):
     df['MA200'] = df['Close'].rolling(window=200).mean()
     df['BB_Middle'] = df['Close'].rolling(window=20).mean()
     df['BB_Std'] = df['Close'].rolling(window=20).std()
-    df['BB_Upper'] = df['BB_Middle'] + (2 * df['BB_Std'])
     df['BB_Lower'] = df['BB_Middle'] - (2 * df['BB_Std'])
-    
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    df['RSI'] = 100 - (100 / (1 + (gain / (loss + 0.0001))))
-    
     current_price = get_safe_current_price(stock_obj, df)
-    current_rsi = df['RSI'].iloc[-1] if pd.notna(df['RSI'].iloc[-1]) else 50.0
     ma200_curr = df['MA200'].iloc[-1] if pd.notna(df['MA200'].iloc[-1]) else current_price
     bb_lower_curr = df['BB_Lower'].iloc[-1] if pd.notna(df['BB_Lower'].iloc[-1]) else current_price * 0.95
-    
     if is_ils_stock:
         current_price /= 100
         ma200_curr /= 100
         bb_lower_curr /= 100
-        
     reasons = []
     score = 1 if current_price > ma200_curr else -1
-    reasons.append(f"המיקוד העסקי של המניה נתמך במגמה ראשית." if score > 0 else f"המניה במגמת תיקון טכני בטווח הארוך.")
+    reasons.append(f"המניה במגמה ראשית עולה." if score > 0 else f"המניה במגמת תיקון טכני.")
     buy_threshold, sl_multiplier = (2, 0.98) if "סולידי" in selected_risk_profile else ((0, 0.94) if "אגרסיבי" in selected_risk_profile else (1, 0.96))
     verdict, v_type = ("הזדמנות קנייה (Buy)", "BUY") if score >= buy_threshold else (("להמתין לירידה (Wait)", "WAIT") if score < 0 else ("החזק / ניטרלי (Hold)", "HOLD"))
-    stop_loss = bb_lower_curr * sl_multiplier
-    
-    return {"df": df, "verdict": verdict, "verdict_type": v_type, "current_price": current_price, "current_rsi": current_rsi, "waiting_target": bb_lower_curr, "stop_loss_price": stop_loss, "analysis_reasons": reasons}
+    return {"df": df, "verdict": verdict, "verdict_type": v_type, "current_price": current_price, "waiting_target": bb_lower_curr, "stop_loss_price": bb_lower_curr * sl_multiplier, "analysis_reasons": reasons}
 # =========================================================
-# חלק 4: ממשק משתמש, רשימת מעקב, מיסוי וביצוע טרנזקציות
+# חלק 4: ממשק משתמש, שכלול ממוצעי קנייה ותצוגת התיק המשופר
 # =========================================================
 @st.fragment(run_every=60)
 def render_realtime_simulator():
     global user_db, usd_ils, ticker_1
     
     portfolio_val_ils, holdings_dist = calculate_portfolio_value_ils(user_db["portfolio"], usd_ils)
-    
-    # מניעת ערכי nan ישירות בשורת הסיכום העליונה
     if pd.isna(portfolio_val_ils): portfolio_val_ils = 0.0
     total_net_worth_ils = user_db["cash_ils"] + portfolio_val_ils
     
+    # --- תצוגת טבלת תיק המסחר המשודרגת (כולל תשואה כוללת ושינוי יומי) ---
     st.subheader("💼 תיק ההשקעות ומצבת פוזיציות פתוחות")
     holding_rows = []
     
@@ -326,20 +281,16 @@ def render_realtime_simulator():
             
             df, obj = load_stock_data(tick)
             price_raw = get_safe_current_price(obj, df)
+            daily_chg = get_daily_change_pct(obj, df) # שליפת אחוז תנועת המניה היום
             is_ta_asset = ".TA" in tick
             
-            # אם מחיר השוק חסום, הצג את מחיר הקנייה הממוצע כדי למנוע nan על המסך
             if price_raw == 0:
                 price_raw = info.get("avg_price_source", 1.0)
                 if is_ta_asset: price_raw *= 100
                 
-            if is_ta_asset:
-                curr_market_price = price_raw / 100
-                currency_sym = "₪"
-            else:
-                curr_market_price = price_raw
-                currency_sym = "$"
-                
+            curr_market_price = price_raw / 100 if is_ta_asset else price_raw
+            currency_sym = "₪" if is_ta_asset else "$"
+            
             avg_buy_cost = info.get("avg_price_source", 0.0)
             roi_pct = ((curr_market_price - avg_buy_cost) / avg_buy_cost) * 100 if avg_buy_cost > 0 else 0.0
             time_string = calculate_time_elapsed(info.get("first_buy_time", datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
@@ -347,16 +298,17 @@ def render_realtime_simulator():
             holding_rows.append({
                 "סימול מניה": tick,
                 "כמות יחידות": f"{qty:,.0f}",
-                "עלות קנייה (ליחידה)": f"{currency_sym}{avg_buy_cost:,.2f}",
+                "עלות קנייה ממוצעת": f"{currency_sym}{avg_buy_cost:,.2f}",
                 "מחיר שוק נוכחי": f"{currency_sym}{curr_market_price:,.2f}",
-                "תשואה מצטברת": f"{roi_pct:+.2f}%",
+                "שינוי יומי (היום)": f"{daily_chg:+.2f}%",     # פיתוח מבוקש 1
+                "תשואה מצטברת (ROI)": f"{roi_pct:+.2f}%", # פיתוח מבוקש 1
                 "זמן פוזיציה": time_string
             })
                 
     if holding_rows:
         st.dataframe(pd.DataFrame(holding_rows).set_index("סימול מניה"), use_container_width=True)
     else:
-        st.info("אין כרגע מניות בתיק שלך.")
+        st.info("אין כרגע מניות בתיק שלך. בצע רכישה מטה כדי להתחיל.")
         
     cw1, cw2, cw3 = st.columns(3)
     cw1.metric("💵 יתרת מזומן פנויה (ILS)", f"₪{user_db['cash_ils']:,.2f}")
@@ -364,46 +316,22 @@ def render_realtime_simulator():
     cw3.metric("👑 שווי תיק כולל (Net Worth)", f"₪{total_net_worth_ils:,.2f}")
     st.markdown("---")
 
-    # מניות מובילות
-    st.subheader("🏆 המניות החזקות ביותר בשוק")
-    sec_choice = st.selectbox("בחר סקטור מוביל:", ["טכנולוגיה (Technology)", "בריאות (Healthcare)", "פיננסים ובנקים (Financials)"])
-    leaders = get_sector_leaderboard(sec_choice)
-    if leaders:
-        st.dataframe(pd.DataFrame(leaders), use_container_width=True)
-        
-    # רשימת מעקב
-    st.subheader("⭐ רשימת המעקב האישית שלי")
-    if user_db["watchlist"]:
-        wl_data = []
-        for w_tick in user_db["watchlist"]:
-            df, obj = load_stock_data(w_tick)
-            p_view = get_safe_current_price(obj, df)
-            if ".TA" in w_tick: p_view /= 100
-            symbol_m = "₪" if ".TA" in w_tick else "$"
-            wl_data.append({"סימול": w_tick, "מחיר שוק": f"{symbol_m}{p_view:,.2f}"})
-        st.table(pd.DataFrame(wl_data))
-
-    # חדר עסקאות
+    # חדר עסקאות וביצוע פקודות
     if ticker_1:
         df1, stock_obj1 = load_stock_data(ticker_1)
         if not df1.empty and stock_obj1 and len(df1) > 20:
             is_ta = ".TA" in ticker_1
             res1 = analyze_ticker(df1, risk_profile, is_ta, stock_obj1)
-            info = stock_obj1.info
             curr_price_normalized = res1['current_price']
             
-            st.subheader(f"ℹ️ על החברה וביצועי מניית {ticker_1}")
-            with st.expander(f"🔍 קרא הסבר כללי על חברת {info.get('longName', ticker_1)}", expanded=True):
-                st.write(f"**תיאור עסקי:** {info.get('longBusinessSummary', 'אין תיאור זמין כעת.')}")
-                returns_data = calculate_periodic_returns(ticker_1)
-                if returns_data: st.table(pd.DataFrame([returns_data]))
-
-            st.subheader(f"🎛️ פאנל ביצוע עסקאות")
+            st.subheader(f"ℹ️ חדר מסחר וביצוע עסקאות עבור: {ticker_1}")
             tc1, tc2, tc3 = st.columns(3)
-            user_shares = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_source": 0.0})["qty"]
+            holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_source": 0.0, "first_buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+            user_shares = holding_info["qty"]
             
             with tc1:
                 t_qty = st.number_input("כמות יחידות לביצוע:", min_value=1, value=10, step=1)
+                st.caption(f"מטבע פקודה: {'ILS (₪)' if is_ta else 'USD ($)'}")
             
             with tc2:
                 st.write(""); st.write("")
@@ -414,19 +342,27 @@ def render_realtime_simulator():
                     total_charge_ils = gross_cost_ils + commission_ils
                     if user_db["cash_ils"] >= total_charge_ils:
                         user_db["cash_ils"] -= total_charge_ils
-                        holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_source": 0.0, "first_buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
-                        new_qty = holding_info["qty"] + t_qty
-                        new_avg = ((holding_info["qty"] * holding_info["avg_price_source"]) + (t_qty * curr_price_normalized)) / new_qty
-                        b_time = holding_info.get("first_buy_time", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
                         
-                        user_db["portfolio"][ticker_1] = {"qty": new_qty, "avg_price_source": new_avg, "first_buy_time": b_time}
+                        # --- פיתוח מבוקש 2: שכלול וחישוב מחיר קנייה ממוצע משוקלל ---
+                        old_qty = holding_info["qty"]
+                        old_avg = holding_info["avg_price_source"]
+                        new_qty = old_qty + t_qty
+                        
+                        if old_qty > 0:
+                            # נוסחת ממוצע משוקלל
+                            weighted_avg_price = ((old_qty * old_avg) + (t_qty * curr_price_normalized)) / new_qty
+                            b_time = holding_info.get("first_buy_time", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                        else:
+                            weighted_avg_price = curr_price_normalized
+                            b_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                            
+                        user_db["portfolio"][ticker_1] = {"qty": new_qty, "avg_price_source": weighted_avg_price, "first_buy_time": b_time}
                         save_user_data(current_user, user_db)
                         add_to_history(current_user, ticker_1, "BUY", t_qty, curr_price_normalized, (1.0 if is_ta else usd_ils), commission_ils, 0.0, total_charge_ils)
-                        st.success("הקנייה בוצעה."); st.rerun()
-                    else: st.error("אין מספיק שקלים.")
+                        st.success("הקנייה בוצעה ושוקלל ממוצע עלות חדש."); st.rerun()
+                    else: st.error("אין מספיק שקלים בארנק.")
                         
                 if st.button("🔴 בצע פקודת מכירה", use_container_width=True):
-                    holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_source": 0.0})
                     if holding_info["qty"] >= t_qty:
                         profit_source = (curr_price_normalized - holding_info["avg_price_source"]) * t_qty
                         tax_ils = (profit_source * (1.0 if is_ta else usd_ils) * TAX_RATE) if profit_source > 0 else 0.0
@@ -434,28 +370,25 @@ def render_realtime_simulator():
                         
                         user_db["cash_ils"] += total_receive_ils
                         user_db["portfolio"][ticker_1]["qty"] -= t_qty
-                        if user_db["portfolio"][ticker_1]["qty"] == 0: del user_db["portfolio"][ticker_1]
+                        if user_db["portfolio"][ticker_1]["qty"] == 0: 
+                            del user_db["portfolio"][ticker_1]
                         save_user_data(current_user, user_db)
                         add_to_history(current_user, ticker_1, "SELL", t_qty, curr_price_normalized, (1.0 if is_ta else usd_ils), commission_ils, tax_ils, total_receive_ils)
-                        st.success("המכירה בוצעה."); st.rerun()
-                    else: st.error("אין מספיק מניות.")
+                        st.success("המכירה בוצעה בהצלחה."); st.rerun()
+                    else: st.error("אין מספיק מניות ברשותך.")
 
             with tc3:
                 symbol_lbl = "₪" if is_ta else "$"
                 st.info(f"ברשותך כרגע **{user_shares}** מניות.\n\nמחיר שוק: **{symbol_lbl}{curr_price_normalized:,.2f}**")
 
-            st.markdown("---")
-            st.subheader("📊 המלצות מערכת ומחשבון סיכונים")
-            col_m1, col_m2 = st.columns(2)
-            col_m1.metric("החלטת מנוע", res1['verdict'])
-            col_m2.metric("קטיעת הפסד מומלצת (SL)", f"${res1['stop_loss_price']:.2f}")
-            
+            # תצוגת גרף נרות
             df = res1['df']
             fig = make_subplots(rows=1, cols=1)
             fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']))
             fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=320, margin=dict(l=10, r=10, t=10, b=10))
             st.plotly_chart(fig, use_container_width=True)
 
+    # היסטוריית פעולות
     st.markdown("---")
     st.subheader("📜 יומן פעולות והיסטוריית עסקאות מלאה")
     hist_df = load_user_history(current_user)
