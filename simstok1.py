@@ -10,11 +10,11 @@ import json
 from datetime import datetime, timedelta
 
 # =========================================================
-# חלק 1: הגדרות דף, בסיס נתונים SQLite משודרג (גרסה 9) ומיסוי
+# חלק 1: הגדרות דף, בסיס נתונים SQLite משודרג ותיקון יציב לשליפה
 # =========================================================
 st.set_page_config(page_title="סימולטור השקעות מקצועי", layout="wide")
 
-DB_FILE = "/tmp/simulator_pro_v9.db" # עדכון גרסה לתמיכה בשכלול ממוצעים נקי
+DB_FILE = "/tmp/simulator_pro_v10.db" # עדכון גרסה קטנה לניקוי זיכרון שבור
 TAX_RATE = 0.25      
 COMMISSION_RATE = 0.001 
 
@@ -59,11 +59,12 @@ def load_user_data(username):
     row = c.fetchone()
     conn.close()
     if row:
+        # תיקון קריטי: פירוק הרשומה (row) לאינדקסים תואמים כדי למנוע את ה-TypeError
         return {
-            "cash_ils": float(row) if pd.notna(row) else 100000.0, 
-            "portfolio": json.loads(row) if row else {}, 
-            "orders": json.loads(row) if row else [], 
-            "watchlist": json.loads(row) if row else []
+            "cash_ils": float(row[0]) if pd.notna(row[0]) else 100000.0, 
+            "portfolio": json.loads(row[1]) if row[1] else {}, 
+            "orders": json.loads(row[2]) if row[2] else [], 
+            "watchlist": json.loads(row[3]) if row[3] else []
         }
     return {"cash_ils": 100000.0, "portfolio": {}, "orders": [], "watchlist": []}
 
@@ -91,6 +92,7 @@ def load_user_history(username):
     return df
 
 init_db()
+
 def get_usd_ils_rate():
     try:
         df = yf.Ticker("USDILS=X").history(period="1d")
