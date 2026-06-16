@@ -10,11 +10,11 @@ import json
 from datetime import datetime, timedelta
 
 # =========================================================
-# חלק 1: הגדרות דף, בסיס נתונים SQLite יציב (גרסה 11)
+# חלק 1: הגדרות דף, בסיס נתונים SQLite יציב (גרסה 12)
 # =========================================================
 st.set_page_config(page_title="סימולטור השקעות מקצועי בלשוניות", layout="wide")
 
-DB_FILE = "/tmp/simulator_pro_v11.db" # עדכון גרסה למבנה הלשוניות והעוגה הנקי
+DB_FILE = "/tmp/simulator_pro_v12.db" # עדכון גרסה קטן לסנכרון מלא של הלשוניות
 TAX_RATE = 0.25      
 COMMISSION_RATE = 0.001 
 
@@ -212,6 +212,36 @@ def calculate_time_elapsed(buy_timestamp_str):
         return f"{minutes} דקות"
     except: return "N/A"
 
+def calculate_periodic_returns(ticker_symbol):
+    try:
+        df, _ = load_stock_data(ticker_symbol)
+        if df.empty or len(df) < 5: return None
+        curr = df['Close'].iloc[-1]
+        def get_pct(days):
+            old = df['Close'].iloc[max(0, len(df) - days)]
+            return ((curr - old) / old) * 100
+        return {"שבוע אחרון": f"{get_pct(5):+.2f}%", "חודש אחרון": f"{get_pct(21):+.2f}%", "חצי שנה": f"{get_pct(126):+.2f}%", "שנה אחרונה": f"{get_pct(len(df)-1):+.2f}%"}
+    except: return None
+
+def get_sector_leaderboard(sector_name):
+    sector_map = {
+        "טכנולוגיה (Technology)": ["AAPL", "MSFT", "NVDA", "NICE.TA"],
+        "בריאות (Healthcare)": ["JNJ", "LLY", "TEVA.TA", "PFE"],
+        "פיננסים ובנקים (Financials)": ["JPM", "BAC", "LUMI.TA", "POLI.TA"]
+    }
+    tickers = sector_map.get(sector_name, ["AAPL", "MSFT"])
+    rows = []
+    for tick in tickers:
+        try:
+            df, obj = load_stock_data(tick)
+            c_p = get_safe_current_price(obj, df)
+            if c_p > 0:
+                if ".TA" in tick: c_p /= 100
+                symbol_display = "₪" if ".TA" in tick else "$"
+                rows.append({"סימול": tick, "מחיר": f"{symbol_display}{c_p:,.2f}"})
+        except: pass
+    return rows
+
 def calculate_portfolio_value_ils(portfolio, ex_rate):
     total_val_ils = 0.0
     shares_data = {}
@@ -239,8 +269,16 @@ def analyze_ticker(df, selected_risk_profile, is_ils_stock, stock_obj):
     df['MA200'] = df['Close'].rolling(window=200).mean()
     df['BB_Middle'] = df['Close'].rolling(window=20).mean()
     df['BB_Std'] = df['Close'].rolling(window=20).std()
+    df['BB_Upper'] = df['BB_Middle'] + (2 * df['BB_Std'])
     df['BB_Lower'] = df['BB_Middle'] - (2 * df['BB_Std'])
+    
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    df['RSI'] = 100 - (100 / (1 + (gain / (loss + 0.0001))))
+    
     current_price = get_safe_current_price(stock_obj, df)
+    current_rsi = df['RSI'].iloc[-1] if pd.notna(df['RSI'].iloc[-1]) else 50.0
     ma200_curr = df['MA200'].iloc[-1] if pd.notna(df['MA200'].iloc[-1]) else current_price
     bb_lower_curr = df['BB_Lower'].iloc[-1] if pd.notna(df['BB_Lower'].iloc[-1]) else current_price * 0.95
     if is_ils_stock:
@@ -263,7 +301,6 @@ def render_realtime_simulator():
     if pd.isna(portfolio_val_ils): portfolio_val_ils = 0.0
     total_net_worth_ils = user_db["cash_ils"] + portfolio_val_ils
     
-    # יצירת הלשוניות החדשות לחוויית משתמש נקייה (UX)
     tab_portfolio, tab_trade, tab_history = st.tabs([
         "💼 תיק ההשקעות ופילוח נכסים", 
         "🔍 חדר מסחר ואנליזת מניות", 
@@ -304,7 +341,6 @@ def render_realtime_simulator():
                 asset_val_ils = curr_market_price * qty * (1.0 if is_ta_asset else usd_ils)
                 currency_sym = "₪" if is_ta_asset else "$"
                 
-                # הוספת נתונים לגרף העוגה
                 pie_labels.append(tick)
                 pie_values.append(asset_val_ils)
                 
@@ -325,7 +361,6 @@ def render_realtime_simulator():
         if holding_rows:
             st.dataframe(pd.DataFrame(holding_rows).set_index("סימול מניה"), use_container_width=True)
             
-            # --- פיתוח מבוקש: הצגת גרף עוגה של התפלגות התיק ---
             st.markdown("---")
             st.subheader("🍩 פילוח ויזואלי של נכסי התיק (Asset Allocation)")
             fig_pie = go.Figure(data=[go.Pie(labels=pie_labels, values=pie_values, hole=.4, textinfo='label+percent')])
@@ -335,7 +370,7 @@ def render_realtime_simulator():
             st.info("אין כרגע מניות בתיק שלך. בצע רכישה בלשונית חדר המסחר.")
 
     # -----------------------------------------------------
-    # לשונית 2: חדר מסחר ואנליזת מניות (מבודד ומרווח)
+    # לשונית 2: חדר מסחר ואנליזת מניות
     # -----------------------------------------------------
     with tab_trade:
         if ticker_1:
@@ -348,6 +383,7 @@ def render_realtime_simulator():
                 
                 st.subheader(f"ℹ️ חדר מסחר וביצוע עסקאות עבור: {ticker_1}")
                 with st.expander(f"🔍 קרא הסבר כללי על חברת {info.get('longName', ticker_1)}", expanded=True):
+                    st.write(f"**תחום פעילות:** {info.get('sector', 'N/A')} | **תעשייה:** {info.get('industry', 'N/A')}")
                     st.write(f"**תיאור עסקי:** {info.get('longBusinessSummary', 'אין תיאור זמין כעת.')}")
                     returns_data = calculate_periodic_returns(ticker_1)
                     if returns_data: st.table(pd.DataFrame([returns_data]))
@@ -357,6 +393,7 @@ def render_realtime_simulator():
                 
                 with tc1:
                     t_qty = st.number_input("כמות יחידות לביצוע:", min_value=1, value=10, step=1, key="trade_qty_input")
+                    st.caption(f"מטבע פקודה: {'ILS (₪)' if is_ta else 'USD ($)'}")
                 
                 with tc2:
                     st.write(""); st.write("")
