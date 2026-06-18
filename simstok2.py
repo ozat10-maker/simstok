@@ -10,15 +10,16 @@ import json
 from datetime import datetime, timedelta
 
 # =========================================================
-# חלק 1: הגדרות דף, בסיס נתונים SQLite יציב (גרסה 13)
+# חלק 1: הגדרות דף, מסד נתונים מאובטח ומערכת המיסוי
 # =========================================================
-st.set_page_config(page_title="סימולטור השקעות מקצועי בלשוניות", layout="wide")
+st.set_page_config(page_title="סימולטור השקעות מקצועי", layout="wide")
 
-DB_FILE = "/tmp/simulator_pro_v13.db" 
+DB_FILE = "/tmp/simulator_final_v15.db" # קובץ נקי למניעת שגיאות אופרטיביות
 TAX_RATE = 0.25      
 COMMISSION_RATE = 0.001 
 
 def init_db():
+    """יצירה מאובטחת של כל הטבלאות הנדרשות באפליקציה"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS users 
@@ -27,7 +28,7 @@ def init_db():
                  (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, timestamp TEXT, ticker TEXT, 
                   action TEXT, qty REAL, price_usd REAL, ex_rate REAL, commission_ils REAL, tax_ils REAL, total_ils REAL)''')
     c.execute('''CREATE TABLE IF NOT EXISTS portfolio_history 
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, timestamp TEXT, net_worth REAL)''')
+                 (username TEXT, timestamp TEXT, total_val_ils REAL)''')
     conn.commit()
     conn.close()
 
@@ -35,6 +36,7 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 def register_user(username, password):
+    init_db() # וידוא קיומה של הטבלה לפני כל רישום
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT username FROM users WHERE username=?", (username,))
@@ -47,14 +49,15 @@ def register_user(username, password):
     return True
 
 def login_user(username, password):
+    init_db()
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT username FROM users WHERE username=? AND password=?", (username, hash_password(password)))
     user = c.fetchone()
     conn.close()
     return user is not None
-
 def load_user_data(username):
+    init_db()
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT cash_ils, portfolio, orders, watchlist FROM users WHERE username=?", (username,))
@@ -76,6 +79,7 @@ def save_user_data(username, data):
               (data["cash_ils"], json.dumps(data["portfolio"]), json.dumps(data["orders"]), json.dumps(data["watchlist"]), username))
     conn.commit()
     conn.close()
+
 def add_to_history(username, ticker, action, qty, price_usd, ex_rate, commission_ils, tax_ils, total_ils):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -91,20 +95,24 @@ def load_user_history(username):
     conn.close()
     return df
 
-def log_portfolio_history(username, net_worth):
+def log_portfolio_history(username, total_val_ils):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    c.execute("INSERT INTO portfolio_history (username, timestamp, net_worth) VALUES (?, ?, ?)", (username, now_str, net_worth))
-    conn.commit()
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M')
+    c.execute("SELECT timestamp FROM portfolio_history WHERE username=? ORDER BY timestamp DESC LIMIT 1", (username,))
+    row = c.fetchone()
+    if not row or row[0] != now_str:
+        c.execute("INSERT INTO portfolio_history VALUES (?, ?, ?)", (username, now_str, total_val_ils))
+        conn.commit()
     conn.close()
 
 def load_portfolio_history(username):
     conn = sqlite3.connect(DB_FILE)
-    df = pd.read_sql_query("SELECT timestamp as 'זמן', net_worth as 'שווי תיק (₪)' FROM portfolio_history WHERE username=? ORDER BY id ASC", conn, params=(username,))
+    df = pd.read_sql_query("SELECT timestamp as 'זמן', total_val_ils as 'שווי תיק (₪)' FROM portfolio_history WHERE username=? ORDER BY timestamp ASC", conn, params=(username,))
     conn.close()
     return df
 
+init_db()
 def get_usd_ils_rate():
     try:
         df = yf.Ticker("USDILS=X").history(period="1d")
@@ -128,7 +136,9 @@ def render_top_market_indices():
             if ".TA" in ticker:  
                 close_today /= 100
                 close_yesterday /= 100
-            pct_change = ((close_today - close_yesterday) / close_yesterday) * 100 if close_yesterday > 0 else 0.0
+            if close_yesterday > 0:
+                pct_change = ((close_today - close_yesterday) / close_yesterday) * 100
+            else: pct_change = 0.0
             cols[i].metric(name, f"${close_today:,.2f}" if "$" in name or "Bitcoin" in name else f"₪{close_today:,.2f}", f"{pct_change:+.2f}%")
         except: 
             cols[i].metric(name, "טוען...")
@@ -157,7 +167,8 @@ if st.session_state['logged_in_user'] is None:
         reg_pass_input = st.text_input("בחר סיסמה:", type="password", key="reg_pass").strip()
         if st.button("צור חשבון סימולציה חדש", use_container_width=True):
             if reg_user_input and reg_pass_input:
-                if register_user(reg_user_input, reg_pass_input): st.success("החשבון נוצר! בצע התחברות כעת.")
+                if register_user(reg_user_input, reg_pass_input): 
+                    st.success("החשבון נוצר! בצע התחברות כעת.")
                 else: st.error("שם המשתמש תפוס.")
             else: st.warning("אנא מלא את כל השדות.")
     st.stop()
@@ -167,7 +178,7 @@ user_db = load_user_data(current_user)
 usd_ils = get_usd_ils_rate()
 
 st.sidebar.subheader(f"👤 משקיע: {current_user}")
-st.sidebar.info(f"💵 שער חליפין עדכני: 1$ = ₪{usd_ils:.3f}")
+st.sidebar.info(f"💵 שער חליפין: 1$ = ₪{usd_ils:.3f}")
 if st.sidebar.button("🚪 התנתק בבטחה"):
     st.session_state['logged_in_user'] = None
     st.rerun()
@@ -181,7 +192,6 @@ raw_ticker = st.sidebar.text_input("הזן סימול או מספר נייר:", 
 ticker_1 = f"{raw_ticker}.TA" if is_israeli and not raw_ticker.endswith(".TA") else raw_ticker
 end_date = datetime.today()
 start_date = end_date - timedelta(days=365 * 2)
-init_db()
 def load_stock_data(ticker_symbol):
     if not ticker_symbol: return pd.DataFrame(), None
     try:
@@ -281,10 +291,12 @@ def analyze_ticker(df, selected_risk_profile, is_ils_stock, stock_obj):
     df['BB_Std'] = df['Close'].rolling(window=20).std()
     df['BB_Upper'] = df['BB_Middle'] + (2 * df['BB_Std'])
     df['BB_Lower'] = df['BB_Middle'] - (2 * df['BB_Std'])
+    
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     df['RSI'] = 100 - (100 / (1 + (gain / (loss + 0.0001))))
+    
     current_price = get_safe_current_price(stock_obj, df)
     current_rsi = df['RSI'].iloc[-1] if pd.notna(df['RSI'].iloc[-1]) else 50.0
     ma200_curr = df['MA200'].iloc[-1] if pd.notna(df['MA200'].iloc[-1]) else current_price
@@ -301,9 +313,9 @@ def analyze_ticker(df, selected_risk_profile, is_ils_stock, stock_obj):
 
 def calculate_achievements(data, net_worth):
     return {
-        "הטריידר המתחיל": {"desc": "ביצע עסקה ראשונה בסימולטור", "unlocked": len(data["portfolio"]) > 0},
-        "שר האוצר": {"desc": "שווי תיק כולל הגיע ל-110,000 ש\"ח", "unlocked": net_worth >= 110000.0},
-        "המשקיע המפוזר": {"desc": "החזקה ב-3 מניות שונות בו זמנית", "unlocked": len(data["portfolio"]) >= 3}
+        "🚀 פוזיציה ראשונה": {"desc": "ביצעת עסקה בסימולטור", "unlocked": len(data.get("portfolio", {})) > 0},
+        "🛡️ גיוון סיכונים": {"desc": "החזקה ב-3 נכסים שונים ומעלה", "unlocked": len(data.get("portfolio", {})) >= 3},
+        "👑 הון צומח": {"desc": "שווי תיק מעל 105,000 ש\"ח", "unlocked": net_worth > 105000}
     }
 
 def check_and_execute_limit_orders(username, data, ex_rate):
@@ -312,50 +324,52 @@ def check_and_execute_limit_orders(username, data, ex_rate):
     for order in data.get("orders", []):
         tick, target, o_type, qty = order["ticker"], order["target_price"], order["type"], order["qty"]
         df, obj = load_stock_data(tick)
-        if df.empty:
+        curr_price = get_safe_current_price(obj, df)
+        if curr_price == 0:
             updated_orders.append(order)
             continue
-        c_price = get_safe_current_price(obj, df)
-        is_ta = ".TA" in tick
-        if is_ta: c_price /= 100
+        if ".TA" in tick: curr_price /= 100
         
-        if o_type == "BUY_LIMIT" and c_price <= target:
-            cost = qty * c_price * (1.0 if is_ta else ex_rate)
-            comm = cost * COMMISSION_RATE
-            if data["cash_ils"] >= (cost + comm):
-                data["cash_ils"] -= (cost + comm)
-                h_info = data["portfolio"].get(tick, {"qty": 0, "avg_price_source": 0.0, "first_buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
-                new_qty = h_info["qty"] + qty
-                new_avg = ((h_info["qty"] * h_info["avg_price_source"]) + (qty * c_price)) / new_qty if h_info["qty"] > 0 else c_price
-                data["portfolio"][tick] = {"qty": new_qty, "avg_price_source": new_avg, "first_buy_time": h_info.get("first_buy_time", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}
-                add_to_history(username, tick, "BUY_LIMIT_EXEC", qty, c_price, (1.0 if is_ta else ex_rate), comm, 0.0, (cost + comm))
-                executed_any = True
-            else: updated_orders.append(order)
-        elif o_type == "SELL_LIMIT" and c_price >= target:
-            h_info = data["portfolio"].get(tick, {"qty": 0, "avg_price_source": 0.0})
-            if h_info["qty"] >= qty:
-                revenue = qty * c_price * (1.0 if is_ta else ex_rate)
-                comm = revenue * COMMISSION_RATE
-                profit = (c_price - h_info["avg_price_source"]) * qty
-                tax = (profit * (1.0 if is_ta else ex_rate) * TAX_RATE) if profit > 0 else 0.0
-                data["cash_ils"] += (revenue - comm - tax)
-                data["portfolio"][tick]["qty"] -= qty
-                if data["portfolio"][tick]["qty"] == 0: del data["portfolio"][tick]
-                add_to_history(username, tick, "SELL_LIMIT_EXEC", qty, c_price, (1.0 if is_ta else ex_rate), comm, tax, (revenue - comm - tax))
-                executed_any = True
-            else: updated_orders.append(order)
-        else: updated_orders.append(order)
+        is_triggered = False
+        if o_type == "BUY_LIMIT" and curr_price <= target: is_triggered = True
+        elif o_type == "SELL_LIMIT" and curr_price >= target: is_triggered = True
+        
+        if is_triggered:
+            gross = qty * curr_price * (1.0 if ".TA" in tick else ex_rate)
+            comm = gross * COMMISSION_RATE
+            if o_type == "BUY_LIMIT":
+                if data["cash_ils"] >= (gross + comm):
+                    data["cash_ils"] -= (gross + comm)
+                    h_info = data["portfolio"].get(tick, {"qty": 0, "avg_price_source": 0.0, "first_buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+                    new_qty = h_info["qty"] + qty
+                    new_avg = ((h_info["qty"] * h_info["avg_price_source"]) + (qty * curr_price)) / new_qty if h_info["qty"] > 0 else curr_price
+                    data["portfolio"][tick] = {"qty": new_qty, "avg_price_source": new_avg, "first_buy_time": h_info.get("first_buy_time", datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}
+                    add_to_history(username, tick, "BUY_LIMIT_EXEC", qty, curr_price, (1.0 if ".TA" in tick else ex_rate), comm, 0.0, (gross + comm))
+                    executed_any = True
+            else:
+                h_info = data["portfolio"].get(tick, {"qty": 0, "avg_price_source": 0.0})
+                if h_info["qty"] >= qty:
+                    profit = (curr_price - h_info["avg_price_source"]) * qty
+                    tax = (profit * (1.0 if ".TA" in tick else ex_rate) * TAX_RATE) if profit > 0 else 0.0
+                    data["cash_ils"] += (gross - comm - tax)
+                    data["portfolio"][tick]["qty"] -= qty
+                    if data["portfolio"][tick]["qty"] == 0: del data["portfolio"][tick]
+                    add_to_history(username, tick, "SELL_LIMIT_EXEC", qty, curr_price, (1.0 if ".TA" in tick else ex_rate), comm, tax, (gross - comm - tax))
+                    executed_any = True
+        else:
+            updated_orders.append(order)
     if executed_any:
         data["orders"] = updated_orders
         save_user_data(username, data)
         return True
     return False
 # =========================================================
-# חלק 4: חלוקה ללשוניות, תצוגת גרף עוגה וחדר מסחר מבודד
+# חלק 5: חלוקה ללשוניות, תצוגת גרף עוגה וחדר מסחר מבודד
 # =========================================================
 @st.fragment(run_every=60)
 def render_realtime_simulator():
     global user_db, usd_ils, ticker_1
+    
     if check_and_execute_limit_orders(current_user, user_db, usd_ils):
         user_db = load_user_data(current_user)
         
@@ -379,6 +393,7 @@ def render_realtime_simulator():
         cw1.metric("💵 מזומן פנוי (ILS)", f"₪{user_db['cash_ils']:,.2f}")
         cw2.metric("📦 שווי מניות (ILS)", f"₪{portfolio_val_ils:,.2f}")
         cw3.metric("👑 שווי תיק כולל (Net Worth)", f"₪{total_net_worth_ils:,.2f}")
+        
         st.markdown("---")
         st.subheader("📦 פוזיציות פתוחות בתיק")
         holding_rows = []
@@ -402,117 +417,58 @@ def render_realtime_simulator():
                 
                 pie_labels.append(tick)
                 pie_values.append(asset_val_ils)
+                
                 avg_buy_cost = info.get("avg_price_source", 0.0)
                 roi_pct = ((curr_market_price - avg_buy_cost) / avg_buy_cost) * 100 if avg_buy_cost > 0 else 0.0
                 time_string = calculate_time_elapsed(info.get("first_buy_time", datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
                 
                 holding_rows.append({
-                    "סימול מניה": tick,
-                    "כמות יחידות": f"{qty:,.0f}",
-                    "עלות קנייה ממוצעת": f"{currency_sym}{avg_buy_cost:,.2f}",
-                    "מחיר שוק נוכחי": f"{currency_sym}{curr_market_price:,.2f}",
-                    "שווי פוזיציה מעודכן": f"₪{asset_val_ils:,.2f}",
-                    "שינוי יומי": f"{daily_chg:+.2f}%",     
-                    "תשואה מצטברת (ROI)": f"{roi_pct:+.2f}%", 
-                    "זמן פוזיציה": time_string
+                    "סימול מניה": tick, "כמות יחידות": f"{qty:,.0f}", "עלות קנייה ממוצעת": f"{currency_sym}{avg_buy_cost:,.2f}",
+                    "מחיר שוק נוכחי": f"{currency_sym}{curr_market_price:,.2f}", "שווי פוזיציה מעודכן": f"₪{asset_val_ils:,.2f}",
+                    "שינוי יומי": f"{daily_chg:+.2f}%", "תשואה מצטברת (ROI)": f"{roi_pct:+.2f}%", "זמן פוזיציה": time_string
                 })
                     
         if holding_rows:
             st.dataframe(pd.DataFrame(holding_rows).set_index("סימול מניה"), use_container_width=True)
             g_col1, g_col2 = st.columns(2)
             with g_col1:
-                st.subheader("🍩 פילוח ויזואלי של נכסי התיק")
-                fig_pie = go.Figure(data=[go.Pie(labels=pie_labels, values=pie_values, hole=.4, textinfo='label+percent')])
-                fig_pie.update_layout(template="plotly_dark", height=320, margin=dict(l=10, r=10, t=10, b=10))
+                fig_pie = go.Figure(data=[go.Pie(labels=pie_labels, values=pie_values, hole=.4)])
+                fig_pie.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=10, b=10))
                 st.plotly_chart(fig_pie, use_container_width=True)
             with g_col2:
-                st.subheader("📈 עקומת צמיחת שווי התיק לאורך זמן")
                 hist_df = load_portfolio_history(current_user)
                 if not hist_df.empty and len(hist_df) >= 2:
-                    fig_line = go.Figure(data=[go.Scatter(x=hist_df['זמן'], y=hist_df['שווי תיק (₪)'], mode='lines+markers', line=dict(color='#00ffcc', width=2))])
-                    fig_line.update_layout(template="plotly_dark", height=320, margin=dict(l=10, r=10, t=10, b=10))
+                    fig_line = go.Figure(data=[go.Scatter(x=hist_df['זמן'], y=hist_df['שווי תיק (₪)'], mode='lines+markers')])
+                    fig_line.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=10, b=10))
                     st.plotly_chart(fig_line, use_container_width=True)
-                else: st.info("הגרף הקווי יתחיל להתפתח לאחר ביצוע מספר פעולות או שינויים בשווי השוק.")
-        else: st.info("אין כרגע מניות בתיק שלך. בצע רכישה בלשונית חדר המסחר.")
+        else: st.info("אין כרגע מניות בתיק שלך.")
             
         st.markdown("---")
-        st.subheader("🏆 ארון הגביעים ומשימות המשקיע שלי")
+        st.subheader("🏆 ארון הגביעים והמשימות שלי")
         ach_cols = st.columns(len(achievements))
         for idx, (title, details) in enumerate(achievements.items()):
             badge = "🏅" if details["unlocked"] else "🔒"
-            status_color = "green" if details["unlocked"] else "gray"
+            st_color = "green" if details["unlocked"] else "gray"
             with ach_cols[idx]:
-                st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {status_color}; border-radius:10px;'><h3>{badge}</h3><h4>{title}</h4><p style='font-size:12px; color:gray;'>{details['desc']}</p></div>", unsafe_allow_html=True)
-            with tc3:
-                symbol_lbl = "₪" if is_ta else "$"
-                st.info(f"ברשותך כרגע **{holding_info['qty']}** מניות.\n\nמחיר שוק: **{symbol_lbl}{curr_price_normalized:,.2f}**")
+                st.markdown(f"<div style='text-align:center; padding:10px; border:1px solid {st_color}; border-radius:10px;'><h3>{badge}</h3><h4>{title}</h4><p style='font-size:12px; color:gray;'>{details['desc']}</p></div>", unsafe_allow_html=True)
 
-            st.markdown("---")
-            st.subheader("📊 המלצות מערכת ומפת מגמות")
-            st.metric("החלטת מנוע", res1['verdict'])
-            
-            df = res1['df']
-            fig = make_subplots(rows=1, cols=1)
-            fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close']))
-            fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_dark", height=320, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.error("הזן סימול מניה תקין בסרגל הצדי כדי להציג את חדר המסחר.")
-
-    # -----------------------------------------------------
-    # לשונית 3: היסטוריית פעולות, פקודות ממתינות ורשימת מעקב
-    # -----------------------------------------------------
-    with tab_history:
-        st.subheader("⭐ מניות במעקב (Watchlist)")
-        if ticker_1 and st.button("➕/➖ שנה סטטוס מעקב עבור המניה הנוכחית"):
-            if ticker_1 not in user_db["watchlist"]: 
-                user_db["watchlist"].append(ticker_1)
-            else: 
-                user_db["watchlist"].remove(ticker_1)
-            save_user_data(current_user, user_db)
-            st.rerun()
-            
-        if user_db["watchlist"]: 
-            st.write(user_db["watchlist"])
-        
-        st.markdown("---")
-        st.subheader("⏳ פקודות עתידיות ממתינות לביצוע (Limit Orders)")
-        if user_db.get("orders"):
-            st.dataframe(pd.DataFrame(user_db["orders"]), use_container_width=True)
-        else: 
-            st.info("אין פקודות עתידיות ממתינות בחשבונך כרגע.")
-        
-        st.markdown("---")
-        st.subheader("📜 יומן עסקאות מלא")
-        hist_df = load_user_history(current_user)
-        if not hist_df.empty: 
-            st.dataframe(hist_df, use_container_width=True)
-        else: 
-            st.info("לא בוצעו פעולות בחשבון זה.")
-
-    # -----------------------------------------------------
-    # לשונית 4: יועץ השקעות אוטומטי מבוסס AI Advisor
-    # -----------------------------------------------------
-    with tab_ai:
-        st.subheader("🧠 יועץ השקעות וירטואלי - ניתוח ואופטימיזציה")
-        st.write("מנוע הבינה המלאכותית סורק את פיזור הנכסים, המיסים והביצועים שלך ומספק תובנות פעולה:")
-        
-        ai_recommendations = []
-        tech_count = sum(1 for t in user_db["portfolio"].keys() if t in ["AAPL", "MSFT", "NVDA", "NICE.TA"])
-        
-        if portfolio_val_ils == 0:
-            ai_recommendations.append("💼 **תיק במזומן מלא:** התיק שלך מורכב כרגע מ-100% מזומן. מומלץ לבצע עסקת סימולציה ראשונה כדי לצבור ביטחון.")
-        else:
-            cash_pct = (user_db["cash_ils"] / total_net_worth_ils) * 100
-            if cash_pct > 70:
-                ai_recommendations.append("💵 **נזילות גבוהה מדי:** יש לך מעל 70% מזומן פנוי. שקול לנצל הזדמנויות קנייה (Buy) במניות המציגות קרבה לרצועת בולינגר התחתונה.")
-            if tech_count >= 2:
-                ai_recommendations.append("⚠️ **חשיפת יתר לטכנולוגיה:** זיהינו ריכוז גבוה של נכסי טכנולוגיה בתיק. מומלץ לגוון ולרכוש מניות מסקטורים אחרים.")
+    with tab_trade:
+        if ticker_1:
+            df1, stock_obj1 = load_stock_data(ticker_1)
+            if not df1.empty and stock_obj1 and len(df1) > 20:
+                is_ta = ".TA" in ticker_1
+                res1 = analyze_ticker(df1, risk_profile, is_ta, stock_obj1)
+                curr_price_normalized = res1['current_price']
                 
-        if len(user_db["portfolio"]) >= 3:
-            ai_recommendations.append("🛡️ **פיזור מעולה:** כל הכבוד! פיזרת את הפוזיציות שלך על פני מספר נכסים שונים, מה שמקטין את הסיכון.")
-            
-        for rec in ai_recommendations:
-            st.info(rec)
+                st.subheader(f"ℹ️ חדר מסחר וביצוע עסקאות עבור: {ticker_1}")
+                with st.expander(f"🔍 קרא הסבר כללי על החברה"):
+                    st.write(f"**תיאור עסקי:** {stock_obj1.info.get('longBusinessSummary', 'אין תיאור זמין.')}")
+                    returns_data = calculate_periodic_returns(ticker_1)
+                    if returns_data: st.table(pd.DataFrame([returns_data]))
 
-render_realtime_simulator()
+                tc1, tc2, tc3 = st.columns(3)
+                holding_info = user_db["portfolio"].get(ticker_1, {"qty": 0, "avg_price_source": 0.0, "first_buy_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+                
+                with tc1:
+                    t_qty = st.number_input("כמות יחידות לביצוע:", min_value=1, value=10, step=1, key="trade_qty_input")
+                    action_mode = st.radio("סוג הוראת מסחר:", ["ביצוע מיידי (Market)", "פקודה עתידי
